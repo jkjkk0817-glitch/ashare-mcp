@@ -1,9 +1,5 @@
-"""Entry point: argparse switches stdio / Streamable HTTP.
 
-stdio  -> ``mcp.run(transport="stdio")`` (for Claude Desktop / Claude Code).
-http   -> Streamable HTTP at /mcp via uvicorn, with optional Bearer auth middleware
-          (for Claude.ai custom connector / ChatGPT, typically behind cloudflared).
-"""
+"""Entry point: argparse switches stdio / Streamable HTTP."""
 
 from __future__ import annotations
 
@@ -19,7 +15,7 @@ from .app import mcp
 from .config import settings, setup_logging
 
 # Import all tool modules so their @mcp.tool decorators register on import.
-from .tools import (  # noqa: F401  (imported for side effects)
+from .tools import (  # noqa: F401
     chip,
     financial,
     fundflow,
@@ -53,7 +49,19 @@ def _tool_count() -> int | str:
         return len(d) if isinstance(d, dict) else "?"
 
 
-def _print_banner(transport: str, host: str | None = None, port: int | None = None) -> None:
+def _auth0_enabled() -> bool:
+    return bool(
+        settings.auth0_domain
+        and settings.auth0_audience
+        and settings.public_base_url
+    )
+
+
+def _print_banner(
+    transport: str,
+    host: str | None = None,
+    port: int | None = None,
+) -> None:
     try:
         import akshare
 
@@ -61,13 +69,24 @@ def _print_banner(transport: str, host: str | None = None, port: int | None = No
     except Exception:  # noqa: BLE001
         ak_ver = "?"
 
-    endpoint = f"http://{host}:{port}{MCP_PATH}" if transport == "http" else "(stdio)"
-    auth = "ON" if (transport == "http" and settings.mcp_auth_token) else "OFF"
+    endpoint = (
+        f"http://{host}:{port}{MCP_PATH}"
+        if transport == "http"
+        else "(stdio)"
+    )
+
+    if transport == "http" and _auth0_enabled():
+        auth_mode = "Auth0 JWT"
+    elif transport == "http" and settings.mcp_auth_token:
+        auth_mode = "Bearer token"
+    else:
+        auth_mode = "OFF"
+
     banner = f"""
 ╭───────────────────────────────────────────────────────────╮
 │  ashare-mcp  v{__version__}   (China A-share data MCP server)
 │  transport : {transport:<10s}  endpoint: {endpoint}
-│  http auth : {auth:<10s}  tools   : {_tool_count()}
+│  http auth : {auth_mode:<10s}  tools   : {_tool_count()}
 │  akshare   : {ak_ver}
 │  cache db  : {settings.db_path}
 │  log dir   : {settings.log_dir}  (level={settings.log_level})
@@ -77,12 +96,13 @@ def _print_banner(transport: str, host: str | None = None, port: int | None = No
     print(banner, file=sys.stderr, flush=True)
 
     if _ver_tuple(ak_ver) < (1, 18, 0):
-        logger.warning(f"akshare {ak_ver} < 1.18.0 — 建议升级: uv add 'akshare>=1.18.0'")
+        logger.warning(
+            f"akshare {ak_ver} < 1.18.0 — 建议升级: uv add 'akshare>=1.18.0'"
+        )
 
 
 class BearerAuthMiddleware:
-    """Minimal ASGI middleware enforcing ``Authorization: Bearer <token>`` on the HTTP
-    transport when ``MCP_AUTH_TOKEN`` is set. ``/health`` is always open."""
+    """Legacy static Bearer token middleware. /health remains public."""
 
     def __init__(self, app, token: str = "") -> None:
         self.app = app
@@ -100,16 +120,32 @@ class BearerAuthMiddleware:
         path = request.url.path.rstrip("/")
 
         if path.endswith("/health"):
-            await JSONResponse({"status": "ok", "service": "ashare-mcp",
-                                "version": __version__})(scope, receive, send)
+            await JSONResponse(
+                {
+                    "status": "ok",
+                    "service": "ashare-mcp",
+                    "version": __version__,
+                }
+            )(scope, receive, send)
             return
 
         if self.token:
             header = request.headers.get("authorization", "")
-            presented = header[7:].strip() if header[:7].lower() == "bearer " else ""
-            if not (presented and hmac.compare_digest(presented, self.token)):
+            presented = (
+                header[7:].strip()
+                if header[:7].lower() == "bearer "
+                else ""
+            )
+
+            if not (
+                presented
+                and hmac.compare_digest(presented, self.token)
+            ):
                 await JSONResponse(
-                    {"error": "unauthorized", "detail": "missing or invalid bearer token"},
+                    {
+                        "error": "unauthorized",
+                        "detail": "missing or invalid bearer token",
+                    },
                     status_code=401,
                     headers={"WWW-Authenticate": "Bearer"},
                 )(scope, receive, send)
@@ -122,28 +158,67 @@ def _run_http(host: str, port: int) -> None:
     import uvicorn
     from starlette.middleware import Middleware
 
-    token = settings.mcp_auth_token
-    if token:
-        logger.info("HTTP transport: Bearer auth ENABLED (MCP_AUTH_TOKEN set)")
+    if _auth0_enabled():
+        logger.info("HTTP transport: Auth0 JWT authentication ENABLED")
+
+        # FastMCP handles JWT verification and OAuth protected-resource metadata.
+        app = mcp.http_app(path=MCP_PATH)
+
     else:
-        logger.warning(
-            "HTTP transport: Bearer auth DISABLED — set MCP_AUTH_TOKEN before exposing publicly!"
+        token = settings.mcp_auth_token
+
+        if token:
+            logger.info("HTTP transport: legacy Bearer auth ENABLED")
+        else:
+            logger.warning(
+                "HTTP transport: authentication DISABLED — "
+                "do not expose publicly without authentication!"
+            )
+
+        app = mcp.http_app(
+            path=MCP_PATH,
+            middleware=[
+                Middleware(BearerAuthMiddleware, token=token)
+            ],
         )
 
-    app = mcp.http_app(path=MCP_PATH, middleware=[Middleware(BearerAuthMiddleware, token=token)])
-    uvicorn.run(app, host=host, port=port, log_level=settings.log_level.lower())
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=settings.log_level.lower(),
+    )
 
 
 def main() -> None:
     setup_logging()
+
     parser = argparse.ArgumentParser(
         prog="ashare-mcp",
-        description="China A-share data MCP server (akshare/baostock; stdio & Streamable HTTP).",
+        description=(
+            "China A-share data MCP server "
+            "(akshare/baostock; stdio & Streamable HTTP)."
+        ),
     )
-    parser.add_argument("--transport", choices=["stdio", "http"], default="stdio",
-                        help="stdio (local clients) or http (remote via cloudflared). Default: stdio")
-    parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=9876, help="HTTP bind port (default 9876)")
+
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="stdio (local clients) or Streamable HTTP (remote clients).",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="HTTP bind host (default 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=9876,
+        help="HTTP bind port (default 9876)",
+    )
+
     args = parser.parse_args()
 
     _print_banner(args.transport, args.host, args.port)
