@@ -29,10 +29,12 @@ class Settings(BaseSettings):
     mcp_auth_token: str = ""
     default_limit: int = 50
 
-    # Auth0 OAuth / JWT configuration
+    # Auth0 OAuth / OIDC configuration
     auth0_domain: str = ""
     auth0_audience: str = ""
+    auth0_client_id: str = ""
     public_base_url: str = ""
+    jwt_signing_key: str = ""
 
     @field_validator("cache_dir", mode="before")
     @classmethod
