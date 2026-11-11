@@ -6,6 +6,11 @@ from __future__ import annotations
 from fastmcp import FastMCP
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
+from mcp.server.auth.handlers.metadata import MetadataHandler
+from mcp.server.auth.routes import build_metadata, cors_middleware
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
+from starlette.routing import Route
+
 from . import __version__
 from .config import settings
 
@@ -35,6 +40,75 @@ K 线与财报在 akshare 失败时降级到 baostock,可选 tushare。
 """
 
 
+class GrokCompatibleOIDCProxy(OIDCProxy):
+    """Keep DCR registration and OAuth metadata consistent for public clients."""
+
+    async def register_client(self, client_info):
+        # This proxy stores downstream MCP clients as public clients.
+        # Normalize the response object before the SDK serializes it.
+        client_info.token_endpoint_auth_method = "none"
+        client_info.client_secret = None
+        client_info.client_secret_expires_at = None
+
+        await super().register_client(client_info)
+
+    def get_routes(self, mcp_path: str | None = None):
+        routes = super().get_routes(mcp_path)
+        custom_routes = []
+
+        for route in routes:
+            if (
+                isinstance(route, Route)
+                and route.path.startswith(
+                    "/.well-known/oauth-authorization-server"
+                )
+            ):
+                registration_options = (
+                    self.client_registration_options
+                    or ClientRegistrationOptions()
+                )
+                revocation_options = (
+                    self.revocation_options
+                    or RevocationOptions()
+                )
+
+                metadata = build_metadata(
+                    self.base_url,
+                    self.service_documentation_url,
+                    registration_options,
+                    revocation_options,
+                )
+
+                # The proxy authenticates downstream DCR clients as public clients.
+                metadata.token_endpoint_auth_methods_supported = ["none"]
+
+                # CIMD clients may additionally use private_key_jwt.
+                if self._cimd_manager is not None:
+                    metadata.client_id_metadata_document_supported = True
+                    metadata.token_endpoint_auth_methods_supported.append(
+                        "private_key_jwt"
+                    )
+
+                handler = MetadataHandler(metadata)
+
+                custom_routes.append(
+                    Route(
+                        path=route.path,
+                        endpoint=cors_middleware(
+                            handler.handle,
+                            ["GET", "OPTIONS"],
+                        ),
+                        methods=route.methods or ["GET", "OPTIONS"],
+                        name=route.name,
+                        include_in_schema=route.include_in_schema,
+                    )
+                )
+            else:
+                custom_routes.append(route)
+
+        return custom_routes
+
+
 auth = None
 
 if all((
@@ -44,7 +118,7 @@ if all((
     settings.public_base_url,
     settings.jwt_signing_key,
 )):
-    auth = OIDCProxy(
+    auth = GrokCompatibleOIDCProxy(
         config_url=(
             f"https://{settings.auth0_domain}/"
             ".well-known/openid-configuration"
