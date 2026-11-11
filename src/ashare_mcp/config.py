@@ -1,7 +1,8 @@
+
 """Configuration (pydantic-settings) + loguru logging setup.
 
 Reads from environment / .env. All values optional with sensible defaults.
-Runtime data (SQLite cache + logs) live under ``cache_dir`` (default ~/.ashare-mcp).
+Runtime data (SQLite cache + logs) live under cache_dir.
 """
 
 from __future__ import annotations
@@ -27,6 +28,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     mcp_auth_token: str = ""
     default_limit: int = 50
+
+    # Auth0 OAuth / JWT configuration
+    auth0_domain: str = ""
+    auth0_audience: str = ""
+    public_base_url: str = ""
 
     @field_validator("cache_dir", mode="before")
     @classmethod
@@ -72,15 +78,12 @@ _LOG_CONFIGURED = False
 def setup_logging() -> None:
     """Configure loguru once.
 
-    - stderr sink at the configured level. NOTE: we never log to *stdout* because
-      under the stdio transport stdout is the JSON-RPC channel; stderr is safe and
-      is surfaced to MCP clients.
-    - rotating file sink at ~/.ashare-mcp/logs/server.log (10 MB rotation, 7 day
-      retention). DEBUG level records every external API call URL / latency / cache hit.
+    Logs go to stderr and a rotating file, never stdout.
     """
     global _LOG_CONFIGURED
     if _LOG_CONFIGURED:
         return
+
     logger.remove()
     logger.add(
         sys.stderr,
