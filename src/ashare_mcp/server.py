@@ -53,6 +53,9 @@ def _auth0_enabled() -> bool:
     return bool(
         settings.auth0_domain
         and settings.auth0_audience
+        and settings.auth0_client_id
+        and settings.public_base_url
+        and settings.jwt_signing_key
     )
 
 
@@ -75,7 +78,7 @@ def _print_banner(
     )
 
     if transport == "http" and _auth0_enabled():
-        auth_mode = "Auth0 JWT"
+        auth_mode = "Auth0 OAuth"
     elif transport == "http" and settings.mcp_auth_token:
         auth_mode = "Bearer token"
     else:
@@ -158,9 +161,7 @@ def _run_http(host: str, port: int) -> None:
     from starlette.middleware import Middleware
 
     if _auth0_enabled():
-        logger.info("HTTP transport: Auth0 JWT authentication ENABLED")
-
-        # FastMCP validates Auth0 JWT access tokens.
+        logger.info("HTTP transport: Auth0 OIDC OAuth proxy ENABLED")
         app = mcp.http_app(path=MCP_PATH)
 
     else:
