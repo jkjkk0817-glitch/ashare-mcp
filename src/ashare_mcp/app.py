@@ -1,14 +1,16 @@
-"""The shared FastMCP application instance.
 
-Defined in its own module so tool modules can ``from ashare_mcp.app import mcp``
-and register via ``@mcp.tool`` without creating an import cycle with ``server.py``.
-"""
+"""The shared FastMCP application instance."""
 
 from __future__ import annotations
 
+from pydantic import AnyHttpUrl
 from fastmcp import FastMCP
+from fastmcp.server.auth import RemoteAuthProvider
+from fastmcp.server.auth.providers.jwt import JWTVerifier
 
 from . import __version__
+from .config import settings
+
 
 INSTRUCTIONS = """\
 中国 A 股免费数据 MCP server。覆盖行情、资金流向、龙虎榜、融资融券、
@@ -34,4 +36,28 @@ K 线与财报在 akshare 失败时降级到 baostock,可选 tushare。
   工具(同时兼容 ChatGPT deep research)。
 """
 
-mcp: FastMCP = FastMCP("ashare-mcp", instructions=INSTRUCTIONS, version=__version__)
+
+auth = None
+
+if settings.auth0_domain and settings.auth0_audience and settings.public_base_url:
+    issuer = f"https://{settings.auth0_domain}/"
+
+    token_verifier = JWTVerifier(
+        jwks_uri=f"{issuer}.well-known/jwks.json",
+        issuer=issuer,
+        audience=settings.auth0_audience,
+    )
+
+    auth = RemoteAuthProvider(
+        token_verifier=token_verifier,
+        authorization_servers=[AnyHttpUrl(issuer)],
+        base_url=settings.public_base_url,
+    )
+
+
+mcp: FastMCP = FastMCP(
+    "ashare-mcp",
+    instructions=INSTRUCTIONS,
+    version=__version__,
+    auth=auth,
+)
