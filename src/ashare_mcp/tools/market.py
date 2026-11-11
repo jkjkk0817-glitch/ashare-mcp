@@ -1,3 +1,4 @@
+
 """A. 行情 / K线 / 实时报价 tools."""
 
 from __future__ import annotations
@@ -33,28 +34,42 @@ def _fmt_min_dt(s: str, days_ago: int, end: bool) -> str:
 def get_realtime_quote(symbols: list[str]) -> dict:
     """获取一只或多只 A 股的实时行情快照(含五档盘口)。
 
-    用途: 盯盘 / 报价查询。数据为东方财富实时快照,缓存 10 秒。
+    直接按股票代码获取单只行情，避免下载全市场快照造成超时。
     参数:
       symbols: 股票代码列表,接受 "600519" / "sh600519" / "600519.SH" 任意写法。
-    返回 data[]: 每只股票一条,字段含 code, name, price(最新价), pct_change(涨跌幅%),
-      change(涨跌额), open, high, low, prev_close, volume(成交量), amount(成交额),
-      turnover_rate(换手率%), volume_ratio(量比), pe_ttm, pb, total_market_cap,
-      float_market_cap, 以及 bid_ask(五档盘口: bid_1..bid_5 / ask_1..ask_5 等)。
+    返回 data[]: 每只股票一条,包含股票代码、行情字段及五档盘口。
     """
     if not symbols:
         return err("bad_request", "symbols 不能为空", "示例: ['600519','000001']")
-    quotes = ak.spot_lookup(symbols)
-    by_code = {str(q.get("code")): q for q in quotes}
+
     out: list[dict] = []
+
     for s in symbols:
         code = codes.normalize(s)
-        row = dict(by_code.get(code, {"code": code, "name": None}))
+        row = {"code": code, "name": None}
+
         try:
-            row["bid_ask"] = ak.bid_ask(code)
-        except DataSourceError:
+            quote = ak.bid_ask(code)
+            row.update(quote)
+            row["code"] = code
+
+            row["bid_ask"] = {
+                k: v for k, v in quote.items()
+                if k.startswith("bid_") or k.startswith("ask_")
+            }
+
+        except DataSourceError as exc:
+            row["quote_error"] = str(exc)
             row["bid_ask"] = None
+
         out.append(row)
-    return ok(out, count=len(out), source="akshare / 东方财富", note=DISCLAIMER_NOT_ADVICE)
+
+    return ok(
+        out,
+        count=len(out),
+        source="akshare / 东方财富单股行情",
+        note=DISCLAIMER_NOT_ADVICE,
+    )
 
 
 @mcp.tool
@@ -83,8 +98,14 @@ def get_daily_kline(
     except DataSourceError:
         source = "baostock (fallback)"
         data = bs.daily_kline(sym, start_date, end_date, adjust)
-    return ok(data, symbol=sym, count=len(data), adjust=adjust, source=source,
-              note=DISCLAIMER_NOT_ADVICE)
+    return ok(
+        data,
+        symbol=sym,
+        count=len(data),
+        adjust=adjust,
+        source=source,
+        note=DISCLAIMER_NOT_ADVICE,
+    )
 
 
 @mcp.tool
@@ -112,8 +133,16 @@ def get_minute_kline(
     sd = _fmt_min_dt(start_date, days_ago=5, end=False)
     ed = _fmt_min_dt(end_date, days_ago=0, end=True)
     data = ak.minute_hist(sym, period, sd, ed, adjust)
-    return ok(data, symbol=sym, period=period, count=len(data),
-              start=sd, end=ed, source="akshare / 东方财富", note=DISCLAIMER_NOT_ADVICE)
+    return ok(
+        data,
+        symbol=sym,
+        period=period,
+        count=len(data),
+        start=sd,
+        end=ed,
+        source="akshare / 东方财富",
+        note=DISCLAIMER_NOT_ADVICE,
+    )
 
 
 @mcp.tool
@@ -130,4 +159,9 @@ def get_stock_info(symbol: str) -> dict:
     """
     sym = codes.normalize(symbol)
     info = ak.individual_info(sym)
-    return ok(info, symbol=sym, source="akshare / 东方财富", note=DISCLAIMER_NOT_ADVICE)
+    return ok(
+        info,
+        symbol=sym,
+        source="akshare / 东方财富",
+        note=DISCLAIMER_NOT_ADVICE,
+    )
