@@ -53,7 +53,6 @@ def _auth0_enabled() -> bool:
     return bool(
         settings.auth0_domain
         and settings.auth0_audience
-        and settings.public_base_url
     )
 
 
@@ -161,7 +160,7 @@ def _run_http(host: str, port: int) -> None:
     if _auth0_enabled():
         logger.info("HTTP transport: Auth0 JWT authentication ENABLED")
 
-        # FastMCP handles JWT verification and OAuth protected-resource metadata.
+        # FastMCP validates Auth0 JWT access tokens.
         app = mcp.http_app(path=MCP_PATH)
 
     else:
