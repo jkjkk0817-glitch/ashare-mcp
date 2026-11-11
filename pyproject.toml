@@ -17,6 +17,7 @@ dependencies = [
     "loguru>=0.7",
     "pydantic-settings>=2.0",
     "tenacity>=8.0",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
@@ -45,4 +46,3 @@ target-version = "py311"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"
-
