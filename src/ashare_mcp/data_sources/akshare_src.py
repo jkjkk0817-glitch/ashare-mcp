@@ -1,3 +1,4 @@
+
 """Thin akshare wrappers. Each returns JSON-friendly dict / list[dict] (no DataFrames).
 
 Function-name candidate lists make these resilient to akshare's interface renames.
@@ -7,24 +8,57 @@ layer can pass user-friendly inputs.
 
 from __future__ import annotations
 
-from ._base import DataUnavailableError, df_kv_to_dict, df_to_records
+import requests
+
+from ._base import (
+    DataUnavailableError,
+    EmptyDataError,
+    df_kv_to_dict,
+    df_to_records,
+)
 from ._retry import call_ak
 from ..utils import codes, dates
 
-# ---- per-call rename overrides (where COLUMN_MAP needs help) ----
+
+# ---- per-call rename overrides ----
 _BID_ASK_RENAME = {
-    "买一": "bid_1", "买二": "bid_2", "买三": "bid_3", "买四": "bid_4", "买五": "bid_5",
-    "卖一": "ask_1", "卖二": "ask_2", "卖三": "ask_3", "卖四": "ask_4", "卖五": "ask_5",
-    "买1": "bid_1", "买2": "bid_2", "买3": "bid_3", "买4": "bid_4", "买5": "bid_5",
-    "卖1": "ask_1", "卖2": "ask_2", "卖3": "ask_3", "卖4": "ask_4", "卖5": "ask_5",
-    "buy_1": "bid_1", "buy_2": "bid_2", "buy_3": "bid_3", "buy_4": "bid_4", "buy_5": "bid_5",
-    "sell_1": "ask_1", "sell_2": "ask_2", "sell_3": "ask_3", "sell_4": "ask_4", "sell_5": "ask_5",
+    "买一": "bid_1", "买二": "bid_2", "买三": "bid_3",
+    "买四": "bid_4", "买五": "bid_5",
+    "卖一": "ask_1", "卖二": "ask_2", "卖三": "ask_3",
+    "卖四": "ask_4", "卖五": "ask_5",
+    "买1": "bid_1", "买2": "bid_2", "买3": "bid_3",
+    "买4": "bid_4", "买5": "bid_5",
+    "卖1": "ask_1", "卖2": "ask_2", "卖3": "ask_3",
+    "卖4": "ask_4", "卖5": "ask_5",
+    "buy_1": "bid_1", "buy_2": "bid_2", "buy_3": "bid_3",
+    "buy_4": "bid_4", "buy_5": "bid_5",
+    "sell_1": "ask_1", "sell_2": "ask_2", "sell_3": "ask_3",
+    "sell_4": "ask_4", "sell_5": "ask_5",
+    "最新": "price",
+    "最新价": "price",
+    "涨跌": "change",
+    "涨跌额": "change",
+    "涨幅": "pct_change",
+    "涨跌幅": "pct_change",
+    "今开": "open",
+    "最高": "high",
+    "最低": "low",
+    "昨收": "prev_close",
+    "成交量": "volume",
+    "成交额": "amount",
+    "换手率": "turnover_rate",
+    "量比": "volume_ratio",
+    "市盈率": "pe_ttm",
+    "市净率": "pb",
+    "总市值": "total_market_cap",
+    "流通市值": "float_market_cap",
 }
 
 
 # --------------------------------------------------------------------------- #
 # A. Market
 # --------------------------------------------------------------------------- #
+
 def spot_lookup(symbols: list[str]) -> list[dict]:
     wanted = {codes.normalize(s) for s in symbols}
     df = call_ak("stock_zh_a_spot_em")
@@ -39,8 +73,16 @@ def spot_top(limit: int) -> list[dict]:
 
 
 def bid_ask(symbol: str) -> dict:
-    df = call_ak("stock_bid_ask_em", symbol=codes.normalize(symbol))
-    return df_kv_to_dict(df, rename=_BID_ASK_RENAME)
+    """按单只股票获取实时行情及五档盘口。"""
+    code = codes.normalize(symbol)
+    df = call_ak("stock_bid_ask_em", symbol=code)
+    result = df_kv_to_dict(df, rename=_BID_ASK_RENAME)
+
+    if not result:
+        raise EmptyDataError(f"{code} 未获取到实时行情数据")
+
+    result["code"] = code
+    return result
 
 
 def individual_info(symbol: str) -> dict:
@@ -48,7 +90,12 @@ def individual_info(symbol: str) -> dict:
     return df_kv_to_dict(df)
 
 
-def daily_hist(symbol: str, start_date: str, end_date: str, adjust: str = "qfq") -> list[dict]:
+def daily_hist(
+    symbol: str,
+    start_date: str,
+    end_date: str,
+    adjust: str = "qfq",
+) -> list[dict]:
     df = call_ak(
         "stock_zh_a_hist",
         symbol=codes.normalize(symbol),
@@ -61,7 +108,11 @@ def daily_hist(symbol: str, start_date: str, end_date: str, adjust: str = "qfq")
 
 
 def minute_hist(
-    symbol: str, period: str, start_date: str, end_date: str, adjust: str = ""
+    symbol: str,
+    period: str,
+    start_date: str,
+    end_date: str,
+    adjust: str = "",
 ) -> list[dict]:
     df = call_ak(
         "stock_zh_a_hist_min_em",
@@ -77,6 +128,7 @@ def minute_hist(
 # --------------------------------------------------------------------------- #
 # B. Fund flow
 # --------------------------------------------------------------------------- #
+
 def individual_fund_flow(symbol: str) -> list[dict]:
     df = call_ak(
         "stock_individual_fund_flow",
@@ -91,20 +143,154 @@ def market_fund_flow() -> list[dict]:
     return df_to_records(df)
 
 
-def sector_fund_flow_rank(indicator: str, sector_type: str, limit: int | None = None) -> list[dict]:
-    df = call_ak("stock_sector_fund_flow_rank", indicator=indicator, sector_type=sector_type)
+def sector_fund_flow_rank(
+    indicator: str,
+    sector_type: str,
+    limit: int | None = None,
+) -> list[dict]:
+    df = call_ak(
+        "stock_sector_fund_flow_rank",
+        indicator=indicator,
+        sector_type=sector_type,
+    )
     return df_to_records(df, limit=limit)
 
 
-def main_fund_flow_rank(symbol: str = "全部股票", limit: int | None = None) -> list[dict]:
-    df = call_ak("stock_main_fund_flow", symbol=symbol)
-    return df_to_records(df, limit=limit)
+# 东方财富市场范围参数
+_MAIN_FLOW_SCOPES = {
+    "全部股票": (
+        "m:0+t:6+f:!2,m:0+t:13+f:!2,m:0+t:80+f:!2,"
+        "m:1+t:2+f:!2,m:1+t:23+f:!2,m:0+t:7+f:!2,m:1+t:3+f:!2"
+    ),
+    "沪深A股": (
+        "m:0+t:6+f:!2,m:0+t:13+f:!2,m:0+t:80+f:!2,"
+        "m:1+t:2+f:!2,m:1+t:23+f:!2"
+    ),
+    "沪市A股": "m:1+t:2+f:!2,m:1+t:23+f:!2",
+    "科创板": "m:1+t:23+f:!2",
+    "深市A股": "m:0+t:6+f:!2,m:0+t:13+f:!2,m:0+t:80+f:!2",
+    "创业板": "m:0+t:80+f:!2",
+    "沪市B股": "m:1+t:3+f:!2",
+    "深市B股": "m:0+t:7+f:!2",
+}
+
+
+def main_fund_flow_rank(
+    symbol: str = "全部股票",
+    limit: int | None = None,
+) -> list[dict]:
+    """直接从东方财富分页接口获取个股主力资金流排名。
+
+    按主力净流入金额降序排列，只请求第一页指定数量，
+    避免 AKShare 全市场分页下载造成超时。
+    金额单位为人民币元。
+    """
+    scope = str(symbol or "全部股票").strip()
+    fs = _MAIN_FLOW_SCOPES.get(scope)
+
+    if not fs:
+        raise DataUnavailableError(
+            f"不支持的取数范围: {scope}。支持范围: "
+            + ", ".join(_MAIN_FLOW_SCOPES.keys())
+        )
+
+    try:
+        page_size = int(limit) if limit is not None else 50
+    except (TypeError, ValueError):
+        page_size = 50
+
+    page_size = max(1, min(page_size, 200))
+
+    url = "https://push2.eastmoney.com/api/qt/clist/get"
+
+    params = {
+        "pn": "1",
+        "pz": str(page_size),
+        "po": "1",
+        "np": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f62",
+        "fs": fs,
+        "fields": (
+            "f2,f3,f12,f13,f14,f62,f184,"
+            "f225,f165,f263,f109,f175,f264,f160,f100"
+        ),
+    }
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+            "Version/17.0 Mobile/15E148 Safari/604.1"
+        ),
+        "Referer": "https://quote.eastmoney.com/",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=(5, 15),
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+    except requests.RequestException as exc:
+        raise DataUnavailableError(
+            f"东方财富主力资金排名请求失败: {exc}"
+        ) from exc
+    except ValueError as exc:
+        raise DataUnavailableError(
+            "东方财富主力资金排名返回了无法解析的数据"
+        ) from exc
+
+    data_block = payload.get("data") or {}
+    diff = data_block.get("diff") or []
+
+    if isinstance(diff, dict):
+        diff = list(diff.values())
+
+    if not diff:
+        raise EmptyDataError(
+            f"东方财富未返回主力资金排名数据，范围: {scope}"
+        )
+
+    results = []
+
+    for index, item in enumerate(diff, start=1):
+        if not isinstance(item, dict):
+            continue
+
+        results.append({
+            "rank": index,
+            "code": str(item.get("f12") or ""),
+            "name": str(item.get("f14") or ""),
+            "price": item.get("f2"),
+            "pct_change": item.get("f3"),
+            "main_net_inflow": item.get("f62"),
+            "main_net_inflow_pct": item.get("f184"),
+            "sector": item.get("f100"),
+        })
+
+    if not results:
+        raise EmptyDataError("主力资金排名数据为空")
+
+    return results
 
 
 # --------------------------------------------------------------------------- #
 # C. LHB (dragon-tiger list)
 # --------------------------------------------------------------------------- #
-def lhb_detail(start_date: str, end_date: str, limit: int | None = None) -> list[dict]:
+
+def lhb_detail(
+    start_date: str,
+    end_date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak(
         "stock_lhb_detail_em",
         start_date=dates.to_compact(start_date),
@@ -123,7 +309,11 @@ def lhb_stock_detail(symbol: str, date: str, flag: str) -> list[dict]:
     return df_to_records(df)
 
 
-def lhb_institution_daily(start_date: str, end_date: str, limit: int | None = None) -> list[dict]:
+def lhb_institution_daily(
+    start_date: str,
+    end_date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak(
         "stock_lhb_jgmmtj_em",
         start_date=dates.to_compact(start_date),
@@ -132,7 +322,11 @@ def lhb_institution_daily(start_date: str, end_date: str, limit: int | None = No
     return df_to_records(df, limit=limit)
 
 
-def lhb_active_branches(start_date: str, end_date: str, limit: int | None = None) -> list[dict]:
+def lhb_active_branches(
+    start_date: str,
+    end_date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak(
         "stock_lhb_hyyyb_em",
         start_date=dates.to_compact(start_date),
@@ -144,7 +338,12 @@ def lhb_active_branches(start_date: str, end_date: str, limit: int | None = None
 # --------------------------------------------------------------------------- #
 # D. Margin trading
 # --------------------------------------------------------------------------- #
-def margin_sse_summary(start_date: str, end_date: str, limit: int | None = None) -> list[dict]:
+
+def margin_sse_summary(
+    start_date: str,
+    end_date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak(
         "stock_margin_sse",
         start_date=dates.to_compact(start_date),
@@ -158,12 +357,18 @@ def margin_szse_summary(date: str) -> list[dict]:
     return df_to_records(df)
 
 
-def margin_detail_sse(date: str, limit: int | None = None) -> list[dict]:
+def margin_detail_sse(
+    date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak("stock_margin_detail_sse", date=dates.to_compact(date))
     return df_to_records(df, limit=limit)
 
 
-def margin_detail_szse(date: str, limit: int | None = None) -> list[dict]:
+def margin_detail_szse(
+    date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak("stock_margin_detail_szse", date=dates.to_compact(date))
     return df_to_records(df, limit=limit)
 
@@ -171,6 +376,7 @@ def margin_detail_szse(date: str, limit: int | None = None) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # E. HSGT (stock connect)
 # --------------------------------------------------------------------------- #
+
 def southbound_hist(limit: int | None = None) -> list[dict]:
     df = call_ak(["stock_hsgt_hist_em"], symbol="南向资金")
     return df_to_records(df, limit=limit)
@@ -181,8 +387,11 @@ def hsgt_summary() -> list[dict]:
     return df_to_records(df)
 
 
-def northbound_top10(date: str, limit: int | None = None) -> list[dict]:
-    """Best-effort northbound activity. Degraded since 2024-08-19 (no buy/sell split)."""
+def northbound_top10(
+    date: str,
+    limit: int | None = None,
+) -> list[dict]:
+    """Best-effort northbound activity. Degraded since 2024-08-19."""
     df = call_ak(
         "stock_hsgt_stock_statistics_em",
         symbol="北向持股",
@@ -192,22 +401,38 @@ def northbound_top10(date: str, limit: int | None = None) -> list[dict]:
     return df_to_records(df, limit=limit)
 
 
-def northbound_holdings(symbol: str, limit: int | None = None) -> list[dict]:
-    df = call_ak("stock_hsgt_individual_em", symbol=codes.normalize(symbol))
+def northbound_holdings(
+    symbol: str,
+    limit: int | None = None,
+) -> list[dict]:
+    df = call_ak(
+        "stock_hsgt_individual_em",
+        symbol=codes.normalize(symbol),
+    )
     return df_to_records(df, limit=limit)
 
 
 # --------------------------------------------------------------------------- #
 # F. Chip distribution
 # --------------------------------------------------------------------------- #
-def chip_distribution(symbol: str, adjust: str = "", limit: int | None = None) -> list[dict]:
-    df = call_ak("stock_cyq_em", symbol=codes.normalize(symbol), adjust=adjust or "")
+
+def chip_distribution(
+    symbol: str,
+    adjust: str = "",
+    limit: int | None = None,
+) -> list[dict]:
+    df = call_ak(
+        "stock_cyq_em",
+        symbol=codes.normalize(symbol),
+        adjust=adjust or "",
+    )
     return df_to_records(df, limit=limit)
 
 
 # --------------------------------------------------------------------------- #
 # G. Financial / announcements / research
 # --------------------------------------------------------------------------- #
+
 _REPORT_FN = {
     "balance": "stock_balance_sheet_by_report_em",
     "income": "stock_profit_sheet_by_report_em",
@@ -215,77 +440,130 @@ _REPORT_FN = {
 }
 
 
-def financial_report(symbol: str, report_type: str, period: str | None = None,
-                     limit: int | None = None) -> list[dict]:
+def financial_report(
+    symbol: str,
+    report_type: str,
+    period: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
     fn = _REPORT_FN.get(report_type)
     if not fn:
-        raise DataUnavailableError(f"unknown report_type {report_type!r}")
+        raise DataUnavailableError(
+            f"unknown report_type {report_type!r}"
+        )
+
     df = call_ak(fn, symbol=codes.to_em(symbol))
+
     if period:
         p = dates.to_compact(period)
         for col in ("报告期", "REPORT_DATE", "报表日期"):
             if col in df.columns:
-                df = df[df[col].astype(str).str.replace("-", "").str.startswith(p)]
+                df = df[
+                    df[col].astype(str)
+                    .str.replace("-", "")
+                    .str.startswith(p)
+                ]
                 break
+
     return df_to_records(df, limit=limit)
 
 
-def financial_abstract(symbol: str, limit: int | None = None) -> list[dict]:
-    df = call_ak(["stock_financial_abstract"], symbol=codes.normalize(symbol))
+def financial_abstract(
+    symbol: str,
+    limit: int | None = None,
+) -> list[dict]:
+    df = call_ak(
+        ["stock_financial_abstract"],
+        symbol=codes.normalize(symbol),
+    )
     return df_to_records(df, limit=limit)
 
 
-def earnings_forecast(date: str, limit: int | None = None) -> list[dict]:
+def earnings_forecast(
+    date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak("stock_yjyg_em", date=dates.to_compact(date))
     return df_to_records(df, limit=limit)
 
 
-def earnings_express(date: str, limit: int | None = None) -> list[dict]:
+def earnings_express(
+    date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak("stock_yjkb_em", date=dates.to_compact(date))
     return df_to_records(df, limit=limit)
 
 
-def announcements(symbol: str | None = None, limit: int = 20) -> list[dict]:
-    """Recent announcements. Prefer per-stock disclosure (cninfo); fall back to the
-    market-wide notice feed for the latest trading day filtered by code."""
+def announcements(
+    symbol: str | None = None,
+    limit: int = 20,
+) -> list[dict]:
+    """Recent announcements. Prefer per-stock disclosure; fall back to market feed."""
     if symbol:
         code = codes.normalize(symbol)
         try:
+            recent_dates = dates.recent_trade_dates(60)
+            start_date = (
+                recent_dates[0].strftime("%Y-%m-%d")
+                if recent_dates
+                else dates.today_str()
+            )
+
             df = call_ak(
                 ["stock_zh_a_disclosure_report_cninfo"],
                 symbol=code,
                 market="沪深京",
-                start_date=dates.to_dashed(
-                    (dates.recent_trade_dates(60) or [None])[0].strftime("%Y-%m-%d")
-                    if dates.recent_trade_dates(60) else dates.today_str()
-                ),
+                start_date=dates.to_dashed(start_date),
                 end_date=dates.today_str(),
             )
             return df_to_records(df, limit=limit)
+
         except DataUnavailableError:
             pass
-    # fallback: market-wide notices for latest trade day
-    d = dates.to_compact(dates.latest_trade_date().strftime("%Y-%m-%d"))
-    df = call_ak("stock_notice_report", symbol="全部", date=d)
+
+    d = dates.to_compact(
+        dates.latest_trade_date().strftime("%Y-%m-%d")
+    )
+    df = call_ak(
+        "stock_notice_report",
+        symbol="全部",
+        date=d,
+    )
+
     if symbol:
         code = codes.normalize(symbol)
         for col in ("代码", "股票代码"):
             if col in df.columns:
                 df = df[df[col].astype(str) == code]
                 break
+
     return df_to_records(df, limit=limit)
 
 
-def research_reports(symbol: str, limit: int = 10) -> list[dict]:
-    df = call_ak("stock_research_report_em", symbol=codes.normalize(symbol))
+def research_reports(
+    symbol: str,
+    limit: int = 10,
+) -> list[dict]:
+    df = call_ak(
+        "stock_research_report_em",
+        symbol=codes.normalize(symbol),
+    )
     return df_to_records(df, limit=limit)
 
 
 # --------------------------------------------------------------------------- #
 # H. Meta / sentiment
 # --------------------------------------------------------------------------- #
-def zt_pool(date: str, limit: int | None = None) -> list[dict]:
-    df = call_ak("stock_zt_pool_em", date=dates.to_compact(date))
+
+def zt_pool(
+    date: str,
+    limit: int | None = None,
+) -> list[dict]:
+    df = call_ak(
+        "stock_zt_pool_em",
+        date=dates.to_compact(date),
+    )
     return df_to_records(df, limit=limit)
 
 
@@ -303,7 +581,11 @@ def stock_comment_one(symbol: str) -> dict:
     return recs[0] if recs else {}
 
 
-def restricted_release(start_date: str, end_date: str, limit: int | None = None) -> list[dict]:
+def restricted_release(
+    start_date: str,
+    end_date: str,
+    limit: int | None = None,
+) -> list[dict]:
     df = call_ak(
         "stock_restricted_release_summary_em",
         start_date=dates.to_compact(start_date),
