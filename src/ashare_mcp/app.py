@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import JWTVerifier
+from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
 from . import __version__
 from .config import settings
@@ -37,13 +37,24 @@ K 线与财报在 akshare 失败时降级到 baostock,可选 tushare。
 
 auth = None
 
-if settings.auth0_domain and settings.auth0_audience:
-    issuer = f"https://{settings.auth0_domain}/"
-
-    auth = JWTVerifier(
-        jwks_uri=f"{issuer}.well-known/jwks.json",
-        issuer=issuer,
+if all((
+    settings.auth0_domain,
+    settings.auth0_audience,
+    settings.auth0_client_id,
+    settings.public_base_url,
+    settings.jwt_signing_key,
+)):
+    auth = OIDCProxy(
+        config_url=(
+            f"https://{settings.auth0_domain}/"
+            ".well-known/openid-configuration"
+        ),
+        client_id=settings.auth0_client_id,
+        client_secret=None,
         audience=settings.auth0_audience,
+        base_url=settings.public_base_url,
+        token_endpoint_auth_method="none",
+        jwt_signing_key=settings.jwt_signing_key,
     )
 
 
