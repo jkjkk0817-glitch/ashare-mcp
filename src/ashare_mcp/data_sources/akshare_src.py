@@ -2,8 +2,7 @@
 """Thin akshare wrappers. Each returns JSON-friendly dict / list[dict] (no DataFrames).
 
 Function-name candidate lists make these resilient to akshare's interface renames.
-Confirmed against akshare 1.18.64. Code/date normalization happens here so the tool
-layer can pass user-friendly inputs.
+Code/date normalization happens here so the tool layer can pass user-friendly inputs.
 """
 
 from __future__ import annotations
@@ -73,15 +72,128 @@ def spot_top(limit: int) -> list[dict]:
 
 
 def bid_ask(symbol: str) -> dict:
-    """按单只股票获取实时行情及五档盘口。"""
+    """通过东方财富单股行情接口获取实时快照和五档盘口。
+
+    使用独立 HTTP 请求并设置连接、读取超时，避免行情请求无限等待。
+    """
+
     code = codes.normalize(symbol)
-    df = call_ak("stock_bid_ask_em", symbol=code)
-    result = df_kv_to_dict(df, rename=_BID_ASK_RENAME)
+    market = codes.market_of(code)
 
-    if not result:
-        raise EmptyDataError(f"{code} 未获取到实时行情数据")
+    # 东方财富市场代码：沪市为 1，深市为 0
+    market_code = "1" if market == "sh" else "0"
 
-    result["code"] = code
+    url = "https://push2.eastmoney.com/api/qt/stock/get"
+
+    params = {
+        "fltt": "2",
+        "invt": "2",
+        "secid": f"{market_code}.{code}",
+        "fields": (
+            "f43,f44,f45,f46,f47,f48,f49,f50,f51,f52,"
+            "f57,f58,f60,f86,f116,f117,f161,f162,f163,"
+            "f164,f167,f168,f169,f170,"
+            "f11,f12,f13,f14,f15,f16,f17,f18,f19,f20,"
+            "f31,f32,f33,f34,f35,f36,f37,f38,f39,f40"
+        ),
+    }
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://quote.eastmoney.com/",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=(5, 12),
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+    except requests.RequestException as exc:
+        raise DataUnavailableError(
+            f"东方财富实时行情请求失败: {exc}"
+        ) from exc
+
+    except ValueError as exc:
+        raise DataUnavailableError(
+            "东方财富实时行情返回数据无法解析"
+        ) from exc
+
+    data = payload.get("data") or {}
+
+    if not data:
+        raise EmptyDataError(
+            f"{code} 未获取到实时行情数据"
+        )
+
+    def get_value(key: str, multiplier: float = 1.0):
+        value = data.get(key)
+
+        if value is None or value == "" or value == "-":
+            return None
+
+        try:
+            return float(value) * multiplier
+        except (TypeError, ValueError):
+            return value
+
+    result = {
+        "code": code,
+        "name": data.get("f58"),
+        "price": get_value("f43"),
+        "high": get_value("f44"),
+        "low": get_value("f45"),
+        "open": get_value("f46"),
+        "volume": get_value("f47"),
+        "amount": get_value("f48"),
+        "outer_volume": get_value("f49"),
+        "volume_ratio": get_value("f50"),
+        "limit_up": get_value("f51"),
+        "limit_down": get_value("f52"),
+        "prev_close": get_value("f60"),
+        "pct_change": get_value("f170"),
+        "change": get_value("f169"),
+        "turnover_rate": get_value("f168"),
+        "avg_price": get_value("f163"),
+        "inner_volume": get_value("f161"),
+        "total_market_cap": get_value("f116"),
+        "float_market_cap": get_value("f117"),
+    }
+
+    # 卖盘五档：卖一至卖五
+    ask_fields = [
+        ("f39", "f40"),
+        ("f37", "f38"),
+        ("f35", "f36"),
+        ("f33", "f34"),
+        ("f31", "f32"),
+    ]
+
+    # 买盘五档：买一至买五
+    bid_fields = [
+        ("f19", "f20"),
+        ("f17", "f18"),
+        ("f15", "f16"),
+        ("f13", "f14"),
+        ("f11", "f12"),
+    ]
+
+    for level, (price_key, volume_key) in enumerate(ask_fields, 1):
+        result[f"ask_{level}"] = get_value(price_key)
+        result[f"ask_{level}_vol"] = get_value(volume_key, 100)
+
+    for level, (price_key, volume_key) in enumerate(bid_fields, 1):
+        result[f"bid_{level}"] = get_value(price_key)
+        result[f"bid_{level}_vol"] = get_value(volume_key, 100)
+
     return result
 
 
@@ -179,12 +291,8 @@ def main_fund_flow_rank(
     symbol: str = "全部股票",
     limit: int | None = None,
 ) -> list[dict]:
-    """直接从东方财富分页接口获取个股主力资金流排名。
+    """直接从东方财富分页接口获取个股主力资金流排名。"""
 
-    按主力净流入金额降序排列，只请求第一页指定数量，
-    避免 AKShare 全市场分页下载造成超时。
-    金额单位为人民币元。
-    """
     scope = str(symbol or "全部股票").strip()
     fs = _MAIN_FLOW_SCOPES.get(scope)
 
