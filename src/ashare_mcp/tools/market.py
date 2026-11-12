@@ -67,7 +67,7 @@ def get_realtime_quote(symbols: list[str]) -> dict:
     return ok(
         out,
         count=len(out),
-        source="akshare / 东方财富单股行情",
+        source="多数据源自动切换（以 data[] 中每只股票的 source 字段为准）",
         note=DISCLAIMER_NOT_ADVICE,
     )
 
