@@ -99,77 +99,50 @@ def _result_from_row(code: str, r: dict) -> dict:
 @guard
 @cached(ttl=30)
 def fetch(id: str) -> dict:
-    """根据 search 返回的 id 取详细资料(兼容 ChatGPT deep research / company knowledge)。
+    """Fetch a fast single-stock snapshot for ids such as stock:600519.
 
-    参数: id 形如 "stock:600519"(由 search 返回)。
-    返回: {"id","title","text"(人类可读综述),"url","metadata"(结构化字段: info/quote/comment)}。
+    Uses Tencent/Sina directly instead of downloading Eastmoney's full-market
+    snapshot. Slow full-market sentiment and basic-info endpoints are deliberately
+    excluded from this latency-sensitive tool.
     """
     raw = str(id or "")
     kind, _, val = raw.partition(":")
     if kind == "stock" and val:
         code = codes.normalize(val)
-        info = {}
         quote = {}
-        comment = {}
         try:
-            info = ak.individual_info(code)
-        except DataSourceError:
-            pass
-        try:
-            quote = (ak.spot_lookup([code]) or [{}])[0]
-        except DataSourceError:
-            pass
-        try:
-            comment = ak.stock_comment_one(code)
-        except DataSourceError:
-            pass
+            quote = (ak.spot_lookup([code], prefer_alternate=True) or [{}])[0]
+        except DataSourceError as exc:
+            logger.warning(f"fast quote lookup failed for {code}: {exc}")
 
-        name = info.get("name") or quote.get("name") or code
+        name = quote.get("name") or code
         lines = [
             f"{name} ({code})",
-            f"行业: {info.get('industry', '—')}",
-            f"上市时间: {info.get('list_date', '—')}",
-            f"总市值: {info.get('total_market_cap', '—')} | 流通市值: {info.get('float_market_cap', '—')}",
-            f"总股本: {info.get('total_shares', '—')} | 流通股: {info.get('float_shares', '—')}",
+            "基本资料: 本次快速查询未请求（避免慢速接口拖延响应）",
             f"最新价: {quote.get('price', '—')} | 涨跌幅: {quote.get('pct_change', '—')}% | "
-            f"换手率: {quote.get('turnover_rate', '—')}% | 量比: {quote.get('volume_ratio', '—')}",
+            f"换手率: {quote.get('turnover_rate', '—')}%",
+            f"成交量: {quote.get('volume', '—')} | 成交额: {quote.get('amount', '—')}",
         ]
-        comment_date = None
-        for date_key in ("交易日", "数据日期", "日期", "trade_date", "date"):
-            if comment.get(date_key):
-                comment_date = str(comment.get(date_key))
-                break
-        comment_source = "东方财富千股千评（AkShare）" if comment else None
-        if comment:
-            lines.append(
-                f"辅助指标数据日期: {comment_date or '未提供'} | 数据来源: {comment_source}"
-            )
-            lines.append(
-                f"千股千评(软指标,仅供参考): 综合得分 {comment.get('composite_score', '—')} | "
-                f"机构参与度 {comment.get('institution_participation', '—')} | "
-                f"关注指数 {comment.get('attention_index', '—')}"
-            )
-        quote_source = quote.get("source") or "akshare / 东方财富"
+        quote_source = quote.get("source") or "腾讯/新浪备用行情"
         quote_time = quote.get("quote_time") or quote.get("retrieved_at") or "未提供"
         lines.append(
             f"行情数据来源: {quote_source} | 行情时间/获取时间: {quote_time}。"
             "数据仅供研究,不构成投资建议。"
         )
+        lines.append("辅助指标: 本次快速查询未请求；如需分析，请另行调用对应指标工具。")
         return {
             "id": raw,
             "title": f"{name} ({code})",
             "text": "\n".join(str(x) for x in lines),
             "url": _stock_url(code),
-            "metadata": {"code": code, "industry": info.get("industry"),
-                         "info": info, "quote": quote, "comment": comment,
-                         "comment_data_date": comment_date,
-                         "comment_source": comment_source},
+            "metadata": {
+                "code": code,
+                "quote": quote,
+                "info": {},
+                "comment": {},
+                "comment_data_date": None,
+                "comment_source": None,
+                "note": "快速查询模式：跳过慢速基本资料及全市场千股千评接口",
+            },
         }
 
-    return {
-        "id": raw,
-        "title": raw or "unknown",
-        "text": "未知的 id。请先调用 search 获取形如 'stock:600519' 的 id 再 fetch。",
-        "url": "",
-        "metadata": {},
-    }
