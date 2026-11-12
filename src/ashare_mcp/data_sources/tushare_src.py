@@ -97,7 +97,11 @@ def market_fund_flow() -> list[dict]:
             f"Tushare moneyflow_mkt_dc request/parse failed: {type(exc).__name__}: {exc}"
         ) from exc
 
-    if not isinstance(payload, dict) or int(payload.get("code", -1)) != 0:
+    try:
+        response_code = int(payload.get("code", -1)) if isinstance(payload, dict) else -1
+    except (TypeError, ValueError):
+        response_code = -1
+    if response_code != 0:
         code = payload.get("code") if isinstance(payload, dict) else "invalid_response"
         message = payload.get("msg", "invalid response") if isinstance(payload, dict) else "invalid response"
         raise DataUnavailableError(f"Tushare moneyflow_mkt_dc rejected request ({code}): {message}")
