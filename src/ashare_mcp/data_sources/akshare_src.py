@@ -106,7 +106,9 @@ def _alternate_quote(symbol: str) -> dict:
                     "prev_close": prev_close,
                     "open": _as_float(fields[5]),
                     "volume": (_as_float(fields[6]) or 0) * 100,
-                    "amount": (_as_float(fields[37]) or 0) * 10000 if len(fields) > 37 else None,
+                    "amount": (
+                        (_as_float(fields[57]) if len(fields) > 57 else _as_float(fields[37])) or 0
+                    ) * 10000 if len(fields) > 37 else None,
                     "change": _as_float(fields[31]),
                     "pct_change": _as_float(fields[32]),
                     "high": _as_float(fields[33]),
@@ -191,7 +193,7 @@ def spot_lookup(symbols: list[str]) -> list[dict]:
         code_col = "代码" if "代码" in df.columns else df.columns[1]
         sub = df[df[code_col].astype(str).isin(wanted)]
         return df_to_records(sub)
-    except DataUnavailableError as exc:
+    except (DataUnavailableError, EmptyDataError) as exc:
         logger.warning(f"Eastmoney spot lookup unavailable; using Tencent/Sina: {exc}")
         rows = []
         failures = []
