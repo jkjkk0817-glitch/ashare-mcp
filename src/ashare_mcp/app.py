@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+from cryptography.fernet import Fernet
 from fastmcp import FastMCP
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
+from key_value.aio.stores.redis import RedisStore
+from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 from mcp.server.auth.handlers.metadata import MetadataHandler
 from mcp.server.auth.routes import build_metadata, cors_middleware
@@ -109,6 +112,19 @@ class GrokCompatibleOIDCProxy(OIDCProxy):
         return custom_routes
 
 
+# Production uses encrypted Redis storage.
+# Development retains FastMCP's default local storage behavior.
+client_storage = None
+
+if settings.environment == "production":
+    redis_store = RedisStore(url=settings.redis_url)
+
+    client_storage = FernetEncryptionWrapper(
+        key_value=redis_store,
+        fernet=Fernet(settings.storage_encryption_key.encode("utf-8")),
+    )
+
+
 auth = None
 
 if all((
@@ -118,17 +134,30 @@ if all((
     settings.public_base_url,
     settings.jwt_signing_key,
 )):
-    auth = GrokCompatibleOIDCProxy(
-        config_url=(
+    proxy_options = {
+        "config_url": (
             f"https://{settings.auth0_domain}/"
             ".well-known/openid-configuration"
         ),
-        client_id=settings.auth0_client_id,
-        client_secret=None,
-        audience=settings.auth0_audience,
-        base_url=settings.public_base_url,
-        token_endpoint_auth_method="none",
-        jwt_signing_key=settings.jwt_signing_key,
+        "client_id": settings.auth0_client_id,
+        "client_secret": None,
+        "audience": settings.auth0_audience,
+        "base_url": settings.public_base_url,
+        "token_endpoint_auth_method": "none",
+        "jwt_signing_key": settings.jwt_signing_key,
+    }
+
+    if client_storage is not None:
+        proxy_options["client_storage"] = client_storage
+
+    auth = GrokCompatibleOIDCProxy(**proxy_options)
+
+
+# Production configuration validation in config.py ensures that
+# Auth0 and Redis settings cannot silently be omitted.
+if settings.environment == "production" and auth is None:
+    raise RuntimeError(
+        "Production authentication initialization failed."
     )
 
 
