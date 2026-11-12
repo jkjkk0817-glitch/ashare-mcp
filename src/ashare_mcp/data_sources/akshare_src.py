@@ -8,6 +8,8 @@ Code/date normalization happens here so the tool layer can pass user-friendly in
 from __future__ import annotations
 
 import requests
+from datetime import datetime, timezone
+from loguru import logger
 
 from ._base import (
     DataUnavailableError,
@@ -58,12 +60,151 @@ _BID_ASK_RENAME = {
 # A. Market
 # --------------------------------------------------------------------------- #
 
+def _as_float(value):
+    try:
+        if value is None or str(value).strip() in {"", "-"}:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _alternate_quote(symbol: str) -> dict:
+    """Try Tencent first, then Sina. Never return a partial quote without a price."""
+    code = codes.normalize(symbol)
+    prefixed = codes.with_prefix(code)
+    errors = []
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://finance.sina.com.cn/",
+        "Accept": "*/*",
+    }
+
+    # Tencent text API: volume is in lots; amount is in 10,000 CNY.
+    try:
+        response = requests.get(
+            f"https://qt.gtimg.cn/q={prefixed}",
+            headers=headers,
+            timeout=(4, 8),
+        )
+        response.raise_for_status()
+        response.encoding = "gbk"
+        raw = response.text
+        payload = raw.split('="', 1)[1].split('"', 1)[0] if '="' in raw else ""
+        fields = payload.split("~")
+        if len(fields) >= 35 and fields[1].strip():
+            price = _as_float(fields[3])
+            prev_close = _as_float(fields[4])
+            if price is not None and price > 0:
+                result = {
+                    "code": code,
+                    "name": fields[1],
+                    "price": price,
+                    "prev_close": prev_close,
+                    "open": _as_float(fields[5]),
+                    "volume": (_as_float(fields[6]) or 0) * 100,
+                    "amount": (_as_float(fields[37]) or 0) * 10000 if len(fields) > 37 else None,
+                    "change": _as_float(fields[31]),
+                    "pct_change": _as_float(fields[32]),
+                    "high": _as_float(fields[33]),
+                    "low": _as_float(fields[34]),
+                    "turnover_rate": _as_float(fields[38]) if len(fields) > 38 else None,
+                    "source": "腾讯财经实时行情",
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                }
+                # Tencent order: sell 5 -> sell 1, then buy 1 -> buy 5.
+                for level in range(1, 6):
+                    ask_idx = 17 - (level - 1) * 2
+                    bid_idx = 20 + (level - 1) * 2
+                    result[f"ask_{level}"] = _as_float(fields[ask_idx]) if len(fields) > ask_idx else None
+                    result[f"ask_{level}_vol"] = (_as_float(fields[ask_idx + 1]) or 0) * 100 if len(fields) > ask_idx + 1 else None
+                    result[f"bid_{level}"] = _as_float(fields[bid_idx]) if len(fields) > bid_idx else None
+                    result[f"bid_{level}_vol"] = (_as_float(fields[bid_idx + 1]) or 0) * 100 if len(fields) > bid_idx + 1 else None
+                if len(fields) > 30 and fields[30].strip():
+                    result["quote_time"] = fields[30].strip()
+                return result
+        errors.append("腾讯接口返回空数据或字段格式异常")
+    except (requests.RequestException, IndexError, ValueError) as exc:
+        errors.append(f"腾讯接口: {exc}")
+
+    # Sina text API: volume and five-level quantities are already in shares.
+    try:
+        response = requests.get(
+            f"https://hq.sinajs.cn/list={prefixed}",
+            headers=headers,
+            timeout=(4, 8),
+        )
+        response.raise_for_status()
+        response.encoding = "gbk"
+        raw = response.text
+        payload = raw.split('="', 1)[1].split('"', 1)[0] if '="' in raw else ""
+        fields = payload.split(",")
+        if len(fields) >= 32 and fields[0].strip():
+            price = _as_float(fields[3])
+            prev_close = _as_float(fields[2])
+            if price is not None and price > 0:
+                change = price - prev_close if prev_close else None
+                pct = (change / prev_close * 100) if change is not None and prev_close else None
+                result = {
+                    "code": code,
+                    "name": fields[0],
+                    "open": _as_float(fields[1]),
+                    "prev_close": prev_close,
+                    "price": price,
+                    "high": _as_float(fields[4]),
+                    "low": _as_float(fields[5]),
+                    "volume": _as_float(fields[8]),
+                    "amount": _as_float(fields[9]),
+                    "change": change,
+                    "pct_change": pct,
+                    "source": "新浪财经实时行情",
+                    "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                    "quote_time": f"{fields[30]} {fields[31]}".strip(),
+                }
+                for level in range(1, 6):
+                    bid_vol_idx = 10 + (level - 1) * 2
+                    bid_price_idx = bid_vol_idx + 1
+                    ask_vol_idx = 20 + (level - 1) * 2
+                    ask_price_idx = ask_vol_idx + 1
+                    result[f"bid_{level}"] = _as_float(fields[bid_price_idx])
+                    result[f"bid_{level}_vol"] = _as_float(fields[bid_vol_idx])
+                    result[f"ask_{level}"] = _as_float(fields[ask_price_idx])
+                    result[f"ask_{level}_vol"] = _as_float(fields[ask_vol_idx])
+                return result
+        errors.append("新浪接口返回空数据或字段格式异常")
+    except (requests.RequestException, IndexError, ValueError) as exc:
+        errors.append(f"新浪接口: {exc}")
+
+    raise DataUnavailableError(
+        f"{code} 实时行情备用数据源均不可用: " + "；".join(errors)
+    )
+
+
+
 def spot_lookup(symbols: list[str]) -> list[dict]:
     wanted = {codes.normalize(s) for s in symbols}
-    df = call_ak("stock_zh_a_spot_em")
-    code_col = "代码" if "代码" in df.columns else df.columns[1]
-    sub = df[df[code_col].astype(str).isin(wanted)]
-    return df_to_records(sub)
+    try:
+        df = call_ak("stock_zh_a_spot_em")
+        code_col = "代码" if "代码" in df.columns else df.columns[1]
+        sub = df[df[code_col].astype(str).isin(wanted)]
+        return df_to_records(sub)
+    except DataUnavailableError as exc:
+        logger.warning(f"Eastmoney spot lookup unavailable; using Tencent/Sina: {exc}")
+        rows = []
+        failures = []
+        for code in wanted:
+            try:
+                rows.append(_alternate_quote(code))
+            except DataUnavailableError as fallback_exc:
+                failures.append(str(fallback_exc))
+        if rows:
+            return rows
+        raise DataUnavailableError(
+            "东方财富、腾讯和新浪均未能提供个股行情: " + "；".join(failures)
+        ) from exc
 
 
 def spot_top(limit: int) -> list[dict]:
@@ -118,21 +259,18 @@ def bid_ask(symbol: str) -> dict:
         payload = response.json()
 
     except requests.RequestException as exc:
-        raise DataUnavailableError(
-            f"东方财富实时行情请求失败: {exc}"
-        ) from exc
+        logger.warning(f"Eastmoney quote unavailable for {code}; trying Tencent/Sina: {exc}")
+        return _alternate_quote(code)
 
     except ValueError as exc:
-        raise DataUnavailableError(
-            "东方财富实时行情返回数据无法解析"
-        ) from exc
+        logger.warning(f"Eastmoney quote parse failed for {code}; trying Tencent/Sina: {exc}")
+        return _alternate_quote(code)
 
     data = payload.get("data") or {}
 
     if not data:
-        raise EmptyDataError(
-            f"{code} 未获取到实时行情数据"
-        )
+        logger.warning(f"Eastmoney returned no quote for {code}; trying Tencent/Sina")
+        return _alternate_quote(code)
 
     def get_value(key: str, multiplier: float = 1.0):
         value = data.get(key)
@@ -148,6 +286,8 @@ def bid_ask(symbol: str) -> dict:
     result = {
         "code": code,
         "name": data.get("f58"),
+        "source": "东方财富单股实时行情",
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
         "price": get_value("f43"),
         "high": get_value("f44"),
         "low": get_value("f45"),
