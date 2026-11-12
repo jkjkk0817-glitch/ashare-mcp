@@ -140,7 +140,12 @@ def fetch(id: str) -> dict:
                 f"机构参与度 {comment.get('institution_participation', '—')} | "
                 f"关注指数 {comment.get('attention_index', '—')}"
             )
-        lines.append("数据来源: akshare / 东方财富。数据仅供研究,不构成投资建议。")
+        quote_source = quote.get("source") or "akshare / 东方财富"
+        quote_time = quote.get("quote_time") or quote.get("retrieved_at") or "未提供"
+        lines.append(
+            f"行情数据来源: {quote_source} | 行情时间/获取时间: {quote_time}。"
+            "数据仅供研究,不构成投资建议。"
+        )
         return {
             "id": raw,
             "title": f"{name} ({code})",
