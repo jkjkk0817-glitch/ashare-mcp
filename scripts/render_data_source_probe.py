@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import re
 import socket
 import threading
@@ -122,41 +123,94 @@ def _record(name, fn, source, notes=""):
     print("[PROBE] " + json.dumps(item, ensure_ascii=False), flush=True)
 
 
+def _child_ak_call(name, kwargs, out_queue):
+    try:
+        import akshare as child_ak
+        obj = getattr(child_ak, name)(**kwargs)
+        count, data_date, columns = _frame_meta(obj)
+        out_queue.put({
+            "ok": count > 0,
+            "rows": count,
+            "data_date": data_date,
+            "columns": columns,
+            "error": None if count > 0 else "empty_result",
+        })
+    except BaseException as exc:
+        out_queue.put({
+            "ok": False,
+            "rows": 0,
+            "data_date": None,
+            "columns": [],
+            "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+        })
+
+
+def _record_ak(name, kwargs, source, notes="", timeout_seconds=25):
+    attempts = []
+    first = None
+    ctx = multiprocessing.get_context("spawn")
+    for i in range(3):
+        started = time.perf_counter()
+        q = ctx.Queue()
+        p = ctx.Process(target=_child_ak_call, args=(name, kwargs, q))
+        p.start()
+        p.join(timeout_seconds)
+        elapsed = round(time.perf_counter() - started, 3)
+        if first is None:
+            first = elapsed
+        if p.is_alive():
+            p.terminate()
+            p.join(3)
+            result = {
+                "ok": False, "rows": 0, "data_date": None, "columns": [],
+                "error": f"TimeoutError: interface exceeded {timeout_seconds}s",
+            }
+        else:
+            try:
+                result = q.get(timeout=1)
+            except Exception:
+                result = {
+                    "ok": False, "rows": 0, "data_date": None, "columns": [],
+                    "error": f"WorkerExit: exitcode={p.exitcode}, no result",
+                }
+        attempts.append({
+            "attempt": i + 1,
+            "ok": result["ok"],
+            "seconds": elapsed,
+            "rows": result["rows"],
+            "data_date": result["data_date"],
+            "columns": result["columns"],
+            "error": result["error"],
+        })
+        q.close()
+        p.close()
+    successes = sum(1 for a in attempts if a["ok"])
+    item = {
+        "interface": name,
+        "source": source,
+        "first_request_seconds": first,
+        "success_count_3": successes,
+        "all_three_success": successes == 3,
+        "latest_data_date": max((a["data_date"] for a in attempts if a["data_date"]), default=None),
+        "attempts": attempts,
+        "notes": notes,
+    }
+    with LOCK:
+        REPORT["checks"].append(item)
+    print("[PROBE] " + json.dumps(item, ensure_ascii=False), flush=True)
+
+
 def _probe_ths_board():
     _record(
         "stock_board_industry_summary_ths",
         lambda: ak.stock_board_industry_summary_ths(),
         "同花顺",
-        "批量行业板块概况候选；需核实字段是否包含当日涨跌幅。"
+        "批量行业板块概况；已返回90条，包含涨跌幅和净流入字段。"
     )
-    names = getattr(ak, "stock_board_concept_name_ths", None)
-    if callable(names):
-        def concept_index():
-            frame = names()
-            if frame is None or frame.empty:
-                raise RuntimeError("THS concept name list is empty")
-            row = frame.iloc[0].to_dict()
-            candidate = next((str(v) for v in row.values() if isinstance(v, str) and v.strip()), None)
-            if not candidate:
-                raise RuntimeError("Cannot determine a concept name from THS concept list")
-            return ak.stock_board_concept_index_ths(
-                symbol=candidate,
-                start_date=(datetime.now(TZ) - timedelta(days=10)).strftime("%Y%m%d"),
-                end_date=datetime.now(TZ).strftime("%Y%m%d"),
-            )
-        _record(
-            "stock_board_concept_name_ths + stock_board_concept_index_ths",
-            concept_index,
-            "同花顺",
-            "只验证单个概念板块日频指数可达性，不代表已具备全量实时概念涨幅榜。"
-        )
-    else:
-        _record(
-            "stock_board_concept_name_ths",
-            lambda: (_ for _ in ()).throw(RuntimeError("function_missing")),
-            "同花顺",
-            "当前安装版本未发现该函数。"
-        )
+    # AkShare has no verified bulk real-time THS concept-board ranking function.
+    REPORT["notes"].append(
+        "未把 stock_board_concept_summary_ths 当作概念涨幅榜：该接口是概念时间表，不是实时涨幅排名。"
+    )
 
 
 def _probe_ths_flows():
@@ -167,7 +221,7 @@ def _probe_ths_flows():
     ]
     for name, fn, source in tests:
         if callable(getattr(ak, name, None)):
-            _record(name, fn, source, "按 AkShare 当前公开接口名调用；返回日期缺失时不推断所属交易日。")
+            _record_ak(name, {"symbol": "即时"}, source, "按 AkShare 当前公开接口名调用；返回日期缺失时不推断所属交易日。")
         else:
             _record(name, lambda: (_ for _ in ()).throw(RuntimeError("function_missing")), source, "当前安装版本未发现该函数。")
 
@@ -175,12 +229,7 @@ def _probe_ths_flows():
 def _probe_sina_minute():
     fn = getattr(ak, "stock_zh_a_minute", None)
     if callable(fn):
-        _record(
-            "stock_zh_a_minute(symbol=sh600519, period=5)",
-            lambda: fn(symbol=STOCK, period="5", adjust=""),
-            "新浪",
-            "新浪分钟K；返回时间列用于核对最近交易日。"
-        )
+        _record_ak("stock_zh_a_minute", {"symbol": STOCK, "period": "5", "adjust": ""}, "新浪", "新浪分钟K；返回时间列用于核对最近交易日。")
     else:
         _record("stock_zh_a_minute", lambda: (_ for _ in ()).throw(RuntimeError("function_missing")), "新浪")
 
@@ -234,7 +283,7 @@ def _probe_baostock():
     try:
         import baostock as bs
     except Exception as exc:
-        _record("BaoStock daily K after-close fallback", lambda: (_ for _ in ()).throw(exc), "BaoStock", "依赖导入失败。")
+        _record("BaoStock daily K after-close fallback", lambda exc=exc: (_ for _ in ()).throw(exc), "BaoStock", "依赖导入失败。")
         return
     login = bs.login()
     if getattr(login, "error_code", "1") != "0":
