@@ -1,4 +1,3 @@
-
 """Entry point: argparse switches stdio / Streamable HTTP."""
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ from .tools import (  # noqa: F401
     market,
     meta,
     search_fetch,
+    stock_extra,
 )
 
 MCP_PATH = "/mcp"
