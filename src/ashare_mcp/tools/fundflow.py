@@ -16,9 +16,11 @@ from ._helpers import (
     DISCLAIMER_FUNDFLOW,
     DISCLAIMER_NOT_ADVICE,
     clamp_limit,
+    err,
     guard,
     ok,
 )
+from ..utils.freshness import latest_record_date, data_age_days, MARKET_FLOW_MAX_AGE_DAYS
 
 
 @mcp.tool
@@ -45,12 +47,36 @@ def get_individual_fund_flow(symbol: str) -> dict:
 @guard
 @cached(ttl=ttl_intraday_official)
 def get_market_fund_flow() -> dict:
-    """获取沪深市场整体资金流向历史数据。"""
-    data = ak.market_fund_flow()
+    """获取沪深市场整体资金流向历史数据，并校验最新记录日期。"""
+    data, source = ak.market_fund_flow_with_source()
+    latest = latest_record_date(data)
+    if latest is None:
+        return err(
+            "data_date_missing",
+            "市场资金流返回记录缺少可识别日期，已拒绝提供未核验数据。",
+            "检查上游字段变化；不要将无日期数据用于市场环境判断。",
+        )
+    age_days = data_age_days(latest)
+    if age_days > MARKET_FLOW_MAX_AGE_DAYS:
+        return err(
+            "stale_data",
+            f"市场资金流已过期：最新记录日期={latest.isoformat()}，距北京时间当前日期{age_days}天；旧数据已拦截。",
+            "暂不将该数据用于当日市场判断，检查上游更新或备用源。",
+        )
+    source_note = (
+        "Tushare Pro moneyflow_mkt_dc 是备用访问通道，底层仍为东方财富DC统计口径，"
+        "不代表独立统计方法。"
+        if source.startswith("Tushare")
+        else "AkShare 调用东方财富市场资金流接口。"
+    )
     return ok(
         data,
         count=len(data),
-        source="akshare / 东方财富",
+        source=source,
+        latest_data_date=latest.isoformat(),
+        age_calendar_days=age_days,
+        freshness="fresh",
+        source_note=source_note,
         disclaimer=DISCLAIMER_FUNDFLOW,
         note=DISCLAIMER_NOT_ADVICE,
     )
