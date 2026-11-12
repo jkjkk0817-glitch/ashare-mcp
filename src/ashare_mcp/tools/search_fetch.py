@@ -47,8 +47,13 @@ def search(query: str) -> dict:
     seen: set[str] = set()
     digits = re.sub(r"\D", "", q)
 
+    # Exact stock-code searches should avoid downloading the entire market snapshot.
+    # spot_lookup has its own Tencent/Sina fallback when Eastmoney is unavailable.
     try:
-        rows = ak.spot_top(6000)
+        if len(digits) >= 6:
+            rows = ak.spot_lookup([digits])
+        else:
+            rows = ak.spot_top(6000)
     except DataSourceError as e:
         logger.warning(f"search spot fetch failed: {e}")
         rows = []
