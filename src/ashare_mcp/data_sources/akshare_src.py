@@ -117,14 +117,15 @@ def _alternate_quote(symbol: str) -> dict:
                     "source": "腾讯财经实时行情",
                     "retrieved_at": datetime.now(timezone.utc).isoformat(),
                 }
-                # Tencent order: sell 5 -> sell 1, then buy 1 -> buy 5.
+                # Tencent order: buy 1-5 occupy fields 9-18; sell 1-5 occupy fields 19-28.
+                # Prices are at the even index of each pair; quantities are lots (手).
                 for level in range(1, 6):
-                    ask_idx = 17 - (level - 1) * 2
-                    bid_idx = 20 + (level - 1) * 2
-                    result[f"ask_{level}"] = _as_float(fields[ask_idx]) if len(fields) > ask_idx else None
-                    result[f"ask_{level}_vol"] = (_as_float(fields[ask_idx + 1]) or 0) * 100 if len(fields) > ask_idx + 1 else None
+                    bid_idx = 9 + (level - 1) * 2
+                    ask_idx = 19 + (level - 1) * 2
                     result[f"bid_{level}"] = _as_float(fields[bid_idx]) if len(fields) > bid_idx else None
                     result[f"bid_{level}_vol"] = (_as_float(fields[bid_idx + 1]) or 0) * 100 if len(fields) > bid_idx + 1 else None
+                    result[f"ask_{level}"] = _as_float(fields[ask_idx]) if len(fields) > ask_idx else None
+                    result[f"ask_{level}_vol"] = (_as_float(fields[ask_idx + 1]) or 0) * 100 if len(fields) > ask_idx + 1 else None
                 if len(fields) > 30 and fields[30].strip():
                     result["quote_time"] = fields[30].strip()
                 return result
