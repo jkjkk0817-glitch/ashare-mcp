@@ -427,6 +427,10 @@ def market_fund_flow_with_source() -> tuple[list[dict], str]:
         if not records or latest is None:
             raise DataUnavailableError("AkShare market fund flow returned no dated records")
         age = data_age_days(latest)
+        if age < 0:
+            raise DataUnavailableError(
+                f"AkShare market fund flow has a future date: latest_date={latest.isoformat()}"
+            )
         if age > MARKET_FLOW_MAX_AGE_DAYS:
             raise DataUnavailableError(
                 f"AkShare market fund flow is stale: latest_date={latest.isoformat()}, "
