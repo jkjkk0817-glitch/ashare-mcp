@@ -57,6 +57,12 @@ def get_market_fund_flow() -> dict:
             "检查上游字段变化；不要将无日期数据用于市场环境判断。",
         )
     age_days = data_age_days(latest)
+    if age_days < 0:
+        return err(
+            "invalid_data_date",
+            f"市场资金流最新记录日期={latest.isoformat()}，晚于北京时间当前日期，已拒绝使用。",
+            "检查上游日期字段和服务器时间。",
+        )
     if age_days > MARKET_FLOW_MAX_AGE_DAYS:
         return err(
             "stale_data",
