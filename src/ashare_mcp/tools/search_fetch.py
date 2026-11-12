@@ -134,7 +134,16 @@ def fetch(id: str) -> dict:
             f"最新价: {quote.get('price', '—')} | 涨跌幅: {quote.get('pct_change', '—')}% | "
             f"换手率: {quote.get('turnover_rate', '—')}% | 量比: {quote.get('volume_ratio', '—')}",
         ]
+        comment_date = None
+        for date_key in ("交易日", "数据日期", "日期", "trade_date", "date"):
+            if comment.get(date_key):
+                comment_date = str(comment.get(date_key))
+                break
+        comment_source = "东方财富千股千评（AkShare）" if comment else None
         if comment:
+            lines.append(
+                f"辅助指标数据日期: {comment_date or '未提供'} | 数据来源: {comment_source}"
+            )
             lines.append(
                 f"千股千评(软指标,仅供参考): 综合得分 {comment.get('composite_score', '—')} | "
                 f"机构参与度 {comment.get('institution_participation', '—')} | "
@@ -152,7 +161,9 @@ def fetch(id: str) -> dict:
             "text": "\n".join(str(x) for x in lines),
             "url": _stock_url(code),
             "metadata": {"code": code, "industry": info.get("industry"),
-                         "info": info, "quote": quote, "comment": comment},
+                         "info": info, "quote": quote, "comment": comment,
+                         "comment_data_date": comment_date,
+                         "comment_source": comment_source},
         }
 
     return {
