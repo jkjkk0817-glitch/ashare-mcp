@@ -19,6 +19,7 @@ from ._base import (
 )
 from ._retry import call_ak
 from ..utils import codes, dates
+from ..utils.freshness import latest_record_date, data_age_days, MARKET_FLOW_MAX_AGE_DAYS
 
 
 # ---- per-call rename overrides ----
@@ -412,9 +413,47 @@ def individual_fund_flow(symbol: str) -> list[dict]:
     return df_to_records(df)
 
 
+def market_fund_flow_with_source() -> tuple[list[dict], str]:
+    """Get market-wide flow, trying AkShare first and Tushare transport fallback second.
+
+    Tushare moneyflow_mkt_dc uses Eastmoney/DC methodology; it is a separate
+    access route, not an independent measurement source.
+    """
+    primary_error = ""
+    try:
+        df = call_ak("stock_market_fund_flow")
+        records = df_to_records(df)
+        latest = latest_record_date(records)
+        if not records or latest is None:
+            raise DataUnavailableError("AkShare market fund flow returned no dated records")
+        age = data_age_days(latest)
+        if age > MARKET_FLOW_MAX_AGE_DAYS:
+            raise DataUnavailableError(
+                f"AkShare market fund flow is stale: latest_date={latest.isoformat()}, "
+                f"age_days={age}"
+            )
+        return records, "AkShare / 东方财富"
+    except (DataUnavailableError, EmptyDataError) as exc:
+        primary_error = str(exc)
+        logger.warning(f"AkShare market fund flow unavailable or stale; trying Tushare fallback: {exc}")
+
+    try:
+        from . import tushare_src
+
+        records = tushare_src.market_fund_flow()
+        if not records:
+            raise EmptyDataError("Tushare market fund flow returned no rows")
+        return records, "Tushare Pro moneyflow_mkt_dc（东方财富DC口径，备用访问通道）"
+    except (DataUnavailableError, EmptyDataError) as exc:
+        raise DataUnavailableError(
+            f"AkShare market flow failed: {primary_error}; "
+            f"Tushare fallback failed: {exc}"
+        ) from exc
+
+
 def market_fund_flow() -> list[dict]:
-    df = call_ak("stock_market_fund_flow")
-    return df_to_records(df)
+    """Backward-compatible data-only wrapper."""
+    return market_fund_flow_with_source()[0]
 
 
 def sector_fund_flow_rank(
