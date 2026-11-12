@@ -187,8 +187,27 @@ def _alternate_quote(symbol: str) -> dict:
 
 
 
-def spot_lookup(symbols: list[str]) -> list[dict]:
+def spot_lookup(
+    symbols: list[str],
+    prefer_alternate: bool = False,
+) -> list[dict]:
+    """Look up selected stocks; optionally skip Eastmoney's full-market snapshot."""
     wanted = {codes.normalize(s) for s in symbols}
+
+    if prefer_alternate:
+        rows = []
+        failures = []
+        for code in wanted:
+            try:
+                rows.append(_alternate_quote(code))
+            except DataUnavailableError as exc:
+                failures.append(str(exc))
+        if rows:
+            return rows
+        raise DataUnavailableError(
+            "腾讯和新浪均未能提供个股行情: " + "；".join(failures)
+        )
+
     try:
         df = call_ak("stock_zh_a_spot_em")
         code_col = "代码" if "代码" in df.columns else df.columns[1]
