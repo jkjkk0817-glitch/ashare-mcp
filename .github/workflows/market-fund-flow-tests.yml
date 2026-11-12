@@ -1,0 +1,28 @@
+name: Market fund-flow unit tests
+
+on:
+  push:
+    branches:
+      - auth0-oauth-integration
+  pull_request:
+    branches:
+      - auth0-oauth-integration
+
+jobs:
+  market-fund-flow-tests:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: development
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Install project and test dependencies
+        run: uv sync --extra dev
+      - name: Run market fund-flow tests
+        run: uv run pytest -q tests/test_market_fund_flow_freshness.py
