@@ -11,7 +11,13 @@ import sys
 from loguru import logger
 
 from . import __version__
+
+print("[STARTUP] Loading ashare-mcp application...", flush=True)
+
 from .app import mcp
+
+print("[STARTUP] Application imported successfully.", flush=True)
+
 from .config import settings, setup_logging
 
 # Import all tool modules so their @mcp.tool decorators register on import.
@@ -157,12 +163,21 @@ class BearerAuthMiddleware:
 
 
 def _run_http(host: str, port: int) -> None:
+    print("[STARTUP] Loading HTTP server dependencies...", flush=True)
+
     import uvicorn
     from starlette.middleware import Middleware
 
+    print("[STARTUP] HTTP server dependencies loaded.", flush=True)
+
     if _auth0_enabled():
         logger.info("HTTP transport: Auth0 OIDC OAuth proxy ENABLED")
+
+        print("[STARTUP] Creating FastMCP HTTP application...", flush=True)
+
         app = mcp.http_app(path=MCP_PATH)
+
+        print("[STARTUP] FastMCP HTTP application created.", flush=True)
 
     else:
         token = settings.mcp_auth_token
@@ -175,12 +190,21 @@ def _run_http(host: str, port: int) -> None:
                 "do not expose publicly without authentication!"
             )
 
+        print("[STARTUP] Creating FastMCP HTTP application...", flush=True)
+
         app = mcp.http_app(
             path=MCP_PATH,
             middleware=[
                 Middleware(BearerAuthMiddleware, token=token)
             ],
         )
+
+        print("[STARTUP] FastMCP HTTP application created.", flush=True)
+
+    print(
+        f"[STARTUP] Starting Uvicorn on {host}:{port}...",
+        flush=True,
+    )
 
     uvicorn.run(
         app,
