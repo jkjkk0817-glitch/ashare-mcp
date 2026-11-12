@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+print("[STARTUP] Importing application dependencies...", flush=True)
+
 from cryptography.fernet import Fernet
 from fastmcp import FastMCP
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
@@ -16,6 +18,8 @@ from starlette.routing import Route
 
 from . import __version__
 from .config import settings
+
+print("[STARTUP] Application dependencies imported.", flush=True)
 
 
 INSTRUCTIONS = """\
@@ -117,12 +121,18 @@ class GrokCompatibleOIDCProxy(OIDCProxy):
 client_storage = None
 
 if settings.environment == "production":
+    print("[STARTUP] Initializing Redis OAuth storage...", flush=True)
+
     redis_store = RedisStore(url=settings.redis_url)
+
+    print("[STARTUP] Redis store object created.", flush=True)
 
     client_storage = FernetEncryptionWrapper(
         key_value=redis_store,
         fernet=Fernet(settings.storage_encryption_key.encode("utf-8")),
     )
+
+    print("[STARTUP] Encrypted Redis storage initialized.", flush=True)
 
 
 auth = None
@@ -139,6 +149,7 @@ if all((
             f"https://{settings.auth0_domain}/"
             ".well-known/openid-configuration"
         ),
+        "timeout_seconds": 10,
         "client_id": settings.auth0_client_id,
         "client_secret": None,
         "audience": settings.auth0_audience,
@@ -150,7 +161,11 @@ if all((
     if client_storage is not None:
         proxy_options["client_storage"] = client_storage
 
+    print("[STARTUP] Initializing Auth0 OIDC proxy...", flush=True)
+
     auth = GrokCompatibleOIDCProxy(**proxy_options)
+
+    print("[STARTUP] Auth0 OIDC proxy initialized.", flush=True)
 
 
 # Production configuration validation in config.py ensures that
@@ -161,9 +176,13 @@ if settings.environment == "production" and auth is None:
     )
 
 
+print("[STARTUP] Creating FastMCP server instance...", flush=True)
+
 mcp: FastMCP = FastMCP(
     "ashare-mcp",
     instructions=INSTRUCTIONS,
     version=__version__,
     auth=auth,
 )
+
+print("[STARTUP] FastMCP server instance created.", flush=True)
