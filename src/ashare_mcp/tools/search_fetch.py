@@ -146,3 +146,11 @@ def fetch(id: str) -> dict:
             },
         }
 
+
+    return {
+        "id": raw,
+        "title": raw or "unknown",
+        "text": "未知的 id。请先调用 search 获取形如 'stock:600519' 的 id 再 fetch。",
+        "url": "",
+        "metadata": {},
+    }
