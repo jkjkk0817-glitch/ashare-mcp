@@ -1,12 +1,12 @@
-name: Production keepalive (scheduled, disabled by default)
+
+name: Production keepalive (weekday schedule)
 
 on:
-  # Planned schedule: 00:05 UTC = 08:05 China time, Monday-Friday.
-  # DISABLED: uncomment the two lines below only when you decide to activate.
-  # schedule:
-  #   - cron: "5 0 * * 1-5"
-  # Manual dispatch is intentionally harmless: the job condition below
-  # only permits scheduled events, never workflow_dispatch.
+  # Beijing time 08:05, Monday to Friday.
+  schedule:
+    - cron: "5 0 * * 1-5"
+
+  # Manual dispatch is allowed, but the job condition blocks it.
   workflow_dispatch:
 
 permissions:
@@ -18,21 +18,23 @@ concurrency:
 
 jobs:
   warm-production-root:
-    # SAFETY LOCK: hard-disabled. To activate, uncomment the schedule above
-    # and remove "false &&" from the condition below. Manual dispatch stays blocked.
-    if: ${{ false && github.event_name == 'schedule' }}
+    # Only scheduled events can run this job.
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
       - name: Send exactly four root requests at +0, +7, +14, and +21 minutes
         shell: bash
         run: |
           set -uo pipefail
+
           URL="https://ashare-mcp-1otc.onrender.com/"
 
           send_request() {
             local label="$1"
             local utc_ts china_ts result curl_rc
+
             utc_ts="$(date -u --iso-8601=seconds)"
             china_ts="$(TZ=Asia/Shanghai date --iso-8601=seconds)"
 
@@ -50,15 +52,24 @@ jobs:
             fi
           }
 
-          echo "Target: production root URL only; no /mcp path and no data-tool calls."
+          echo "Target: production root URL only."
+          echo "No /mcp path and no data-tool calls."
+
           send_request "warmup_1_at_plus_0m"
-          echo "Waiting 7 minutes until the second request."
+
+          echo "Waiting 7 minutes."
           sleep 420
+
           send_request "warmup_2_at_plus_7m"
-          echo "Waiting 7 minutes until the third request."
+
+          echo "Waiting 7 minutes."
           sleep 420
+
           send_request "warmup_3_at_plus_14m"
-          echo "Waiting 7 minutes until the fourth request."
+
+          echo "Waiting 7 minutes."
           sleep 420
+
           send_request "warmup_4_at_plus_21m"
-          echo "Four-request warmup finished; no further requests will be sent by this run."
+
+          echo "Four-request warmup finished."
