@@ -4,7 +4,7 @@ on:
   # Planned schedule: 00:15 UTC = 08:15 China time, Monday-Friday.
   # DISABLED: uncomment the two lines below only when you decide to activate.
   # schedule:
-  #   - cron: "15 0 * * 1-5"
+  #   - cron: "5 0 * * 1-5"
   # Manual dispatch is intentionally harmless: the job condition below
   # only permits scheduled events, never workflow_dispatch.
   workflow_dispatch:
@@ -22,7 +22,7 @@ jobs:
     # and remove "false &&" from the condition below. Manual dispatch stays blocked.
     if: ${{ false && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Send exactly three root requests at +0, +7, and +14 minutes
         shell: bash
@@ -58,4 +58,7 @@ jobs:
           echo "Waiting 7 minutes until the third request."
           sleep 420
           send_request "warmup_3_at_plus_14m"
-          echo "Three-request warmup finished; no further requests will be sent by this run."
+          echo "Waiting 7 minutes until the fourth request."
+          sleep 420
+          send_request "warmup_4_at_plus_21m"
+          echo "Four-request warmup finished; no further requests will be sent by this run."
