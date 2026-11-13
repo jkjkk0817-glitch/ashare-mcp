@@ -37,7 +37,8 @@ REPORT = {
         "Only THS/EM board ranking and sector fund-flow interfaces are tested in this phase.",
         "Minute K, TDX, and BaoStock checks are intentionally paused.",
         "No project Redis cache is bypassed by pretending to disable upstream/CDN caches; direct means no project Redis read.",
-        "A missing interface date is inferred only when the current trading calendar and THS industry daily-index sample agree.",
+        "A missing interface date is inferred only when Sina Shanghai Composite daily K and THS industry daily-index sample agree; no Eastmoney trading calendar is used.",
+        "session_final is false intraday and becomes true only after close when both independent daily sources confirm the current trading date."
         "Redis cache timing is measured only when PROBE_REDIS_URL is configured; otherwise cache timing is marked skipped.",
     ],
 }
@@ -132,40 +133,20 @@ def _isolated_call(function_name, kwargs, timeout_seconds=60):
     return result
 
 
-def _calendar_eastmoney():
-    now = datetime.now(TZ)
-    first = now.replace(day=1).date().isoformat()
-    last = (now.date() + timedelta(days=20)).isoformat()
-    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
-    params = {
-        "sortColumns": "TRADE_DATE", "sortTypes": "-1", "pageSize": "500",
-        "pageNumber": "1", "reportName": "RPT_TRADE_DATE", "columns": "TRADE_DATE",
-        "filter": f'(TRADE_DATE>="{first}")(TRADE_DATE<="{last}")',
-        "source": "WEB", "client": "WEB",
-    }
-    response = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=(5, 15))
-    response.raise_for_status()
-    records = ((response.json().get("result") or {}).get("data") or [])
-    dates = sorted({d for row in records if (d := _date_from_any(row.get("TRADE_DATE")))})
-    return {
-        "source": "Eastmoney RPT_TRADE_DATE",
-        "dates": dates,
-        "is_trade_day": now.date().isoformat() in dates,
-        "latest_trade_date": max((d for d in dates if d <= now.date().isoformat()), default=None),
-        "error": None,
-    }
-
-
 def _calendar_and_ths_sample():
-    evidence = {"calendar": None, "ths_industry_sample": None, "inferred_date": None,
-                "date_source": "unknown", "error": None}
-    try:
-        evidence["calendar"] = _calendar_eastmoney()
-    except Exception as exc:
-        evidence["calendar"] = {"source": "Eastmoney RPT_TRADE_DATE", "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
-    today = datetime.now(TZ).date()
+    now = datetime.now(TZ)
+    today = now.date()
     start = (today - timedelta(days=12)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
+    evidence = {
+        "sina_shanghai_composite_daily": None,
+        "ths_industry_sample": None,
+        "inferred_date": None,
+        "date_source": "unknown",
+        "session_final": False,
+        "session_final_reason": "not_confirmed",
+        "error": None,
+    }
 
     # Shanghai Composite daily K-line from Sina (AkShare). This is the
     # independent latest-trading-day reference; no Eastmoney calendar is used.
@@ -175,8 +156,6 @@ def _calendar_and_ths_sample():
             {"symbol": "sh000001"},
             timeout_seconds=60,
         )
-        # The index endpoint may return a long history; select the newest date
-        # from its date column, regardless of whether the helper saw it as "date".
         if index_result.get("ok") and index_result.get("payload"):
             records = json.loads(index_result["payload"])
             date_values = []
@@ -207,13 +186,16 @@ def _calendar_and_ths_sample():
             timeout_seconds=60,
         )
         evidence["ths_industry_sample"] = {
-            "symbol": "半导体", "latest_date": sample_result.get("data_date"),
+            "symbol": "半导体",
+            "latest_date": sample_result.get("data_date"),
             "columns": sample_result.get("columns", []),
             "rows": sample_result.get("rows", 0),
             "error": sample_result.get("error"),
         }
     except Exception as exc:
-        evidence["ths_industry_sample"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        evidence["ths_industry_sample"] = {
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}"
+        }
 
     reference = evidence.get("sina_shanghai_composite_daily") or {}
     sample = evidence.get("ths_industry_sample") or {}
@@ -222,10 +204,19 @@ def _calendar_and_ths_sample():
     if latest_index and latest_ths and latest_index == latest_ths:
         evidence["inferred_date"] = latest_index
         evidence["date_source"] = "inferred"
+        if now.time() >= clock_time(15, 5) and latest_index == today.isoformat():
+            evidence["session_final"] = True
+            evidence["session_final_reason"] = "after_close_and_both_sources_confirm_today"
+        elif now.time() < clock_time(15, 5):
+            evidence["session_final_reason"] = "intraday_not_final"
+        else:
+            evidence["session_final_reason"] = "after_close_but_sources_not_on_today"
     else:
-        evidence["error"] = "Sina Shanghai Composite daily K and THS industry daily-index sample do not agree; date left unknown"
+        evidence["error"] = (
+            "Sina Shanghai Composite daily K and THS industry daily-index sample "
+            "do not agree; inferred date left unknown"
+        )
     return evidence
-
 
 def _source_evidence(function_name, expected_domain):
     try:
@@ -356,7 +347,7 @@ def run_session(session_id):
     session_result = {
         "session_id": session_id, "started_at": now.isoformat(),
         "completed_at": datetime.now(TZ).isoformat(),
-        "calendar_and_index_evidence": date_evidence,
+        "date_evidence": date_evidence,\n        "session_final": bool(date_evidence.get("session_final")) if session_id.endswith(":after_close") else False,
         "redis_status": redis_status, "checks": results,
         "individual_stock_flow": {
             "status": "pending_user_stock_codes",
