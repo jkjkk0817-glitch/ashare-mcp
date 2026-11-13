@@ -1,7 +1,7 @@
 name: Production keepalive (scheduled, disabled by default)
 
 on:
-  # Planned schedule: 00:15 UTC = 08:15 China time, Monday-Friday.
+  # Planned schedule: 00:05 UTC = 08:05 China time, Monday-Friday.
   # DISABLED: uncomment the two lines below only when you decide to activate.
   # schedule:
   #   - cron: "5 0 * * 1-5"
@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Send exactly three root requests at +0, +7, and +14 minutes
+      - name: Send exactly four root requests at +0, +7, +14, and +21 minutes
         shell: bash
         run: |
           set -uo pipefail
