@@ -1,0 +1,72 @@
+name: Production keepalive (DISABLED - awaiting approval)
+
+on:
+  # Intentionally no schedule trigger. This workflow is dormant until the user
+  # confirms activation. Do not add schedule entries before that confirmation.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ashare-production-keepalive
+  cancel-in-progress: false
+
+jobs:
+  morning-window:
+    # SAFETY LOCK: keep false until explicit user approval.
+    # Planned trigger when approved: 40 0 * * 1-5 (08:40 China time).
+    if: ${{ false && github.event.schedule == '40 0 * * 1-5' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Wake production web service only and record response latency
+        shell: bash
+        run: |
+          set -u
+          URL="https://ashare-mcp-1otc.onrender.com/"
+          END_EPOCH="$(date -u -d "$(date -u +%F) 04:10:00" +%s)"
+          echo "Dormant template: morning window would end at 12:10 China time."
+          while [ "$(date -u +%s)" -lt "$END_EPOCH" ]; do
+            TS="$(date -u --iso-8601=seconds)"
+            RESULT="$(curl --silent --show-error --output /dev/null \
+              --write-out 'http_code=%{http_code} total_seconds=%{time_total}' \
+              --connect-timeout 20 --max-time 90 "$URL" 2>&1)"
+            RC=$?
+            if [ "$RC" -eq 0 ]; then
+              echo "$TS request_completed $RESULT"
+            else
+              echo "$TS request_failed curl_exit=$RC detail=$RESULT"
+            fi
+            sleep 180
+          done
+          echo "Morning window ended."
+
+  afternoon-window:
+    # SAFETY LOCK: keep false until explicit user approval.
+    # Planned trigger when approved: 10 4 * * 1-5 (12:10 China time).
+    if: ${{ false && github.event.schedule == '10 4 * * 1-5' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 260
+    steps:
+      - name: Wake production web service only and record response latency
+        shell: bash
+        run: |
+          set -u
+          URL="https://ashare-mcp-1otc.onrender.com/"
+          END_EPOCH="$(date -u -d "$(date -u +%F) 08:00:00" +%s)"
+          echo "Dormant template: afternoon window would end at 16:00 China time."
+          while [ "$(date -u +%s)" -lt "$END_EPOCH" ]; do
+            TS="$(date -u --iso-8601=seconds)"
+            RESULT="$(curl --silent --show-error --output /dev/null \
+              --write-out 'http_code=%{http_code} total_seconds=%{time_total}' \
+              --connect-timeout 20 --max-time 90 "$URL" 2>&1)"
+            RC=$?
+            if [ "$RC" -eq 0 ]; then
+              echo "$TS request_completed $RESULT"
+            else
+              echo "$TS request_failed curl_exit=$RC detail=$RESULT"
+            fi
+            sleep 180
+          done
+          echo "Afternoon window ended."
