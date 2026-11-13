@@ -163,10 +163,44 @@ def _calendar_and_ths_sample():
         evidence["calendar"] = _calendar_eastmoney()
     except Exception as exc:
         evidence["calendar"] = {"source": "Eastmoney RPT_TRADE_DATE", "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    today = datetime.now(TZ).date()
+    start = (today - timedelta(days=12)).strftime("%Y%m%d")
+    end = today.strftime("%Y%m%d")
+
+    # Shanghai Composite daily K-line from Sina (AkShare). This is the
+    # independent latest-trading-day reference; no Eastmoney calendar is used.
     try:
-        today = datetime.now(TZ).date()
-        start = (today - timedelta(days=12)).strftime("%Y%m%d")
-        end = today.strftime("%Y%m%d")
+        index_result = _isolated_call(
+            "stock_zh_index_daily",
+            {"symbol": "sh000001"},
+            timeout_seconds=60,
+        )
+        # The index endpoint may return a long history; select the newest date
+        # from its date column, regardless of whether the helper saw it as "date".
+        if index_result.get("ok") and index_result.get("payload"):
+            records = json.loads(index_result["payload"])
+            date_values = []
+            for row in records:
+                if isinstance(row, dict):
+                    for key in ("date", "日期", "trade_date", "交易日期"):
+                        if row.get(key) is not None:
+                            parsed = _date_from_any(row[key])
+                            if parsed:
+                                date_values.append(parsed)
+            index_result["data_date"] = max(date_values) if date_values else None
+        evidence["sina_shanghai_composite_daily"] = {
+            "symbol": "sh000001",
+            "latest_date": index_result.get("data_date"),
+            "rows": index_result.get("rows", 0),
+            "error": index_result.get("error"),
+        }
+    except Exception as exc:
+        evidence["sina_shanghai_composite_daily"] = {
+            "error": f"{type(exc).__name__}: {str(exc)[:300]}"
+        }
+
+    # THS industry daily-index sample, independently queried.
+    try:
         sample_result = _isolated_call(
             "stock_board_industry_index_ths",
             {"symbol": "半导体", "start_date": start, "end_date": end},
@@ -181,15 +215,15 @@ def _calendar_and_ths_sample():
     except Exception as exc:
         evidence["ths_industry_sample"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
 
-    cal = evidence.get("calendar") or {}
+    reference = evidence.get("sina_shanghai_composite_daily") or {}
     sample = evidence.get("ths_industry_sample") or {}
-    latest_cal = cal.get("latest_trade_date")
+    latest_index = reference.get("latest_date")
     latest_ths = sample.get("latest_date")
-    if latest_cal and latest_ths and latest_cal == latest_ths:
-        evidence["inferred_date"] = latest_cal
+    if latest_index and latest_ths and latest_index == latest_ths:
+        evidence["inferred_date"] = latest_index
         evidence["date_source"] = "inferred"
     else:
-        evidence["error"] = "calendar and THS daily-index sample do not agree; date left unknown"
+        evidence["error"] = "Sina Shanghai Composite daily K and THS industry daily-index sample do not agree; date left unknown"
     return evidence
 
 
