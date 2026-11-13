@@ -17,10 +17,9 @@ concurrency:
 
 jobs:
   warm-production-root:
-    # SAFETY LOCK: unset/false by default. To activate, set the repository
-    # Actions variable PRODUCTION_KEEPALIVE_ENABLED to the string "true".
-    # Manual workflow_dispatch remains blocked even after activation.
-    if: ${{ github.event_name == 'schedule' && vars.PRODUCTION_KEEPALIVE_ENABLED == 'true' }}
+    # SAFETY LOCK: hard-disabled. To activate, remove "false &&" from the
+    # condition below. Manual workflow_dispatch remains blocked after activation.
+    if: ${{ false && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
