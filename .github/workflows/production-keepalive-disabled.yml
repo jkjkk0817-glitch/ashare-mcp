@@ -1,8 +1,11 @@
-name: Production keepalive (DISABLED - awaiting approval)
+name: Production keepalive (scheduled, disabled by default)
 
 on:
-  # Intentionally no schedule trigger. This workflow is dormant until the user
-  # confirms activation. Do not add schedule entries before that confirmation.
+  # GitHub Actions cron uses UTC. 00:40-07:40 UTC = 08:40-15:40 China time.
+  schedule:
+    - cron: "40 0-7 * * 1-5"
+  # Manual dispatch is intentionally harmless: the job condition below
+  # only permits scheduled events, never workflow_dispatch.
   workflow_dispatch:
 
 permissions:
@@ -13,60 +16,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  morning-window:
-    # SAFETY LOCK: keep false until explicit user approval.
-    # Planned trigger when approved: 40 0 * * 1-5 (08:40 China time).
-    if: ${{ false && github.event.schedule == '40 0 * * 1-5' }}
+  warm-production-root:
+    # SAFETY LOCK: unset/false by default. To activate, set the repository
+    # Actions variable PRODUCTION_KEEPALIVE_ENABLED to the string "true".
+    # Manual workflow_dispatch remains blocked even after activation.
+    if: ${{ github.event_name == 'schedule' && vars.PRODUCTION_KEEPALIVE_ENABLED == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 8
     steps:
-      - name: Wake production web service only and record response latency
+      - name: Send exactly two root requests and log timestamps, status codes, and latency
         shell: bash
         run: |
-          set -u
+          set -uo pipefail
           URL="https://ashare-mcp-1otc.onrender.com/"
-          END_EPOCH="$(date -u -d "$(date -u +%F) 04:10:00" +%s)"
-          echo "Dormant template: morning window would end at 12:10 China time."
-          while [ "$(date -u +%s)" -lt "$END_EPOCH" ]; do
-            TS="$(date -u --iso-8601=seconds)"
-            RESULT="$(curl --silent --show-error --output /dev/null \
-              --write-out 'http_code=%{http_code} total_seconds=%{time_total}' \
-              --connect-timeout 20 --max-time 90 "$URL" 2>&1)"
-            RC=$?
-            if [ "$RC" -eq 0 ]; then
-              echo "$TS request_completed $RESULT"
-            else
-              echo "$TS request_failed curl_exit=$RC detail=$RESULT"
-            fi
-            sleep 180
-          done
-          echo "Morning window ended."
 
-  afternoon-window:
-    # SAFETY LOCK: keep false until explicit user approval.
-    # Planned trigger when approved: 10 4 * * 1-5 (12:10 China time).
-    if: ${{ false && github.event.schedule == '10 4 * * 1-5' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 260
-    steps:
-      - name: Wake production web service only and record response latency
-        shell: bash
-        run: |
-          set -u
-          URL="https://ashare-mcp-1otc.onrender.com/"
-          END_EPOCH="$(date -u -d "$(date -u +%F) 08:00:00" +%s)"
-          echo "Dormant template: afternoon window would end at 16:00 China time."
-          while [ "$(date -u +%s)" -lt "$END_EPOCH" ]; do
-            TS="$(date -u --iso-8601=seconds)"
-            RESULT="$(curl --silent --show-error --output /dev/null \
-              --write-out 'http_code=%{http_code} total_seconds=%{time_total}' \
+          send_request() {
+            local label="$1"
+            local utc_ts china_ts result curl_rc
+            utc_ts="$(date -u --iso-8601=seconds)"
+            china_ts="$(TZ=Asia/Shanghai date --iso-8601=seconds)"
+
+            set +e
+            result="$(curl --silent --show-error --output /dev/null \
+              --write-out 'http_status=%{http_code} elapsed_seconds=%{time_total}' \
               --connect-timeout 20 --max-time 90 "$URL" 2>&1)"
-            RC=$?
-            if [ "$RC" -eq 0 ]; then
-              echo "$TS request_completed $RESULT"
+            curl_rc=$?
+            set -e
+
+            if [ "$curl_rc" -eq 0 ]; then
+              echo "label=$label utc_timestamp=$utc_ts china_timestamp=$china_ts $result curl_exit=0"
             else
-              echo "$TS request_failed curl_exit=$RC detail=$RESULT"
+              echo "label=$label utc_timestamp=$utc_ts china_timestamp=$china_ts $result curl_exit=$curl_rc"
             fi
-            sleep 180
-          done
-          echo "Afternoon window ended."
+          }
+
+          echo "Target: production root URL only; no /mcp path and no data-tool calls."
+          send_request "warmup_1"
+          echo "Waiting approximately 3 minutes before the second request."
+          sleep 180
+          send_request "warmup_2"
+          echo "Two-request warmup finished; no further requests will be sent by this run."
