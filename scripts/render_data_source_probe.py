@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import inspect
 import json
 import multiprocessing
+import os
 import re
-import socket
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as clock_time
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import requests
 import akshare as ak
 from starlette.applications import Starlette
@@ -16,318 +18,347 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 TZ = ZoneInfo("Asia/Shanghai")
-STOCK = "sh600519"
+STOCKS_PENDING = True
+SCHEDULE = {
+    "2026-11-13": {"intraday": (clock_time(10, 0), clock_time(10, 30)),
+                   "after_close": (clock_time(15, 10), clock_time(15, 35))},
+    "2026-11-16": {"intraday": (clock_time(10, 0), clock_time(10, 30)),
+                   "after_close": (clock_time(15, 10), clock_time(15, 35))},
+    "2026-11-17": {"intraday": (clock_time(10, 0), clock_time(10, 30)),
+                   "after_close": (clock_time(15, 10), clock_time(15, 35))},
+}
 REPORT = {
+    "service": "Render-only board and fund-flow validation",
     "started_at": datetime.now(TZ).isoformat(),
     "akshare_version": getattr(ak, "__version__", "unknown"),
     "python": __import__("sys").version.split()[0],
-    "checks": [],
+    "sessions": [],
     "notes": [
-        "Render-only diagnostic runner; does not import or modify production MCP configuration.",
-        "Each data interface is called three consecutive times. first_request_seconds records the first call.",
-        "data_date is reported only when the returned payload contains an identifiable date; request time is never substituted.",
+        "Only THS/EM board ranking and sector fund-flow interfaces are tested in this phase.",
+        "Minute K, TDX, and BaoStock checks are intentionally paused.",
+        "No project Redis cache is bypassed by pretending to disable upstream/CDN caches; direct means no project Redis read.",
+        "A missing interface date is inferred only when the current trading calendar and THS industry daily-index sample agree.",
+        "Redis cache timing is measured only when PROBE_REDIS_URL is configured; otherwise cache timing is marked skipped.",
     ],
-    "complete": False,
 }
 LOCK = threading.Lock()
+RUNNING = set()
+COMPLETED = set()
 
 
-def _dates(value):
-    found = set()
-    if isinstance(value, dict):
-        for v in value.values():
-            found.update(_dates(v))
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            found.update(_dates(v))
-    elif isinstance(value, str):
-        for m in re.findall(r"(?<!\d)(20\d{2}[-/]?\d{2}[-/]?\d{2})(?!\d)", value):
-            s = m.replace("/", "").replace("-", "")
-            try:
-                found.add(datetime.strptime(s, "%Y%m%d").date().isoformat())
-            except ValueError:
-                pass
-    return found
+def _date_from_any(value):
+    if value is None:
+        return None
+    try:
+        return pd.to_datetime(value).date().isoformat()
+    except Exception:
+        text = str(value)
+        match = re.search(r"(20\d{2})[-/]?(\d{2})[-/]?(\d{2})", text)
+        if match:
+            return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    return None
 
 
 def _frame_meta(obj):
-    if hasattr(obj, "empty") and hasattr(obj, "columns"):
+    if isinstance(obj, pd.DataFrame):
         if obj.empty:
-            return 0, None, list(map(str, obj.columns))
+            return 0, None, list(map(str, obj.columns)), "[]"
         cols = list(map(str, obj.columns))
         date_cols = [c for c in cols if any(k in c.lower() for k in ("日期", "时间", "date", "day", "trade"))]
-        found = set()
-        for c in date_cols:
-            try:
-                found.update(_dates(obj[c].astype(str).tolist()))
-            except Exception:
-                pass
-        if not found:
-            try:
-                found.update(_dates(obj.tail(5).astype(str).values.tolist()))
-            except Exception:
-                pass
-        return len(obj), max(found) if found else None, cols[:24]
-    if isinstance(obj, (list, tuple, dict)):
-        return len(obj), (max(_dates(obj)) if _dates(obj) else None), []
-    return (1 if obj is not None else 0), None, []
+        dates = []
+        for col in date_cols:
+            for value in obj[col].astype(str).tolist():
+                d = _date_from_any(value)
+                if d:
+                    dates.append(d)
+        data_date = max(dates) if dates else None
+        payload = obj.to_json(orient="records", force_ascii=False, date_format="iso")
+        return len(obj), data_date, cols[:30], payload
+    if isinstance(obj, (list, tuple)):
+        payload = json.dumps(obj, ensure_ascii=False, default=str)
+        return len(obj), None, [], payload
+    if isinstance(obj, dict):
+        payload = json.dumps(obj, ensure_ascii=False, default=str)
+        return len(obj), None, list(obj.keys())[:30], payload
+    raise TypeError(f"unsupported result type: {type(obj).__name__}")
 
 
-def _record(name, fn, source, notes=""):
-    attempts = []
-    first = None
-    for i in range(3):
-        started = time.perf_counter()
-        try:
-            obj = fn()
-            elapsed = round(time.perf_counter() - started, 3)
-            if first is None:
-                first = elapsed
-            count, data_date, columns = _frame_meta(obj)
-            ok = count > 0
-            attempts.append({
-                "attempt": i + 1,
-                "ok": ok,
-                "seconds": elapsed,
-                "rows": count,
-                "data_date": data_date,
-                "columns": columns,
-                "error": None if ok else "empty_result",
-            })
-        except Exception as exc:
-            elapsed = round(time.perf_counter() - started, 3)
-            if first is None:
-                first = elapsed
-            attempts.append({
-                "attempt": i + 1,
-                "ok": False,
-                "seconds": elapsed,
-                "rows": 0,
-                "data_date": None,
-                "columns": [],
-                "error": f"{type(exc).__name__}: {str(exc)[:500]}",
-            })
-    successes = sum(1 for a in attempts if a["ok"])
-    item = {
-        "interface": name,
-        "source": source,
-        "first_request_seconds": first,
-        "success_count_3": successes,
-        "all_three_success": successes == 3,
-        "latest_data_date": max((a["data_date"] for a in attempts if a["data_date"]), default=None),
-        "attempts": attempts,
-        "notes": notes,
-    }
-    with LOCK:
-        REPORT["checks"].append(item)
-    print("[PROBE] " + json.dumps(item, ensure_ascii=False), flush=True)
-
-
-def _child_ak_call(name, kwargs, out_queue):
+def _child_call(function_name, kwargs, out_queue):
     try:
-        import akshare as child_ak
-        obj = getattr(child_ak, name)(**kwargs)
-        count, data_date, columns = _frame_meta(obj)
+        import time as _time
+        import akshare as _ak
+        started = _time.perf_counter()
+        obj = getattr(_ak, function_name)(**kwargs)
+        call_seconds = round(_time.perf_counter() - started, 3)
+        rows, data_date, columns, payload = _frame_meta(obj)
         out_queue.put({
-            "ok": count > 0,
-            "rows": count,
+            "ok": rows > 0,
+            "call_seconds": call_seconds,
+            "rows": rows,
             "data_date": data_date,
             "columns": columns,
-            "error": None if count > 0 else "empty_result",
+            "payload": payload,
+            "error": None if rows > 0 else "empty_result",
         })
     except BaseException as exc:
         out_queue.put({
-            "ok": False,
-            "rows": 0,
-            "data_date": None,
-            "columns": [],
+            "ok": False, "call_seconds": None, "rows": 0, "data_date": None,
+            "columns": [], "payload": None,
             "error": f"{type(exc).__name__}: {str(exc)[:500]}",
         })
 
 
-def _record_ak(name, kwargs, source, notes="", timeout_seconds=25):
-    attempts = []
-    first = None
+def _isolated_call(function_name, kwargs, timeout_seconds=60):
     ctx = multiprocessing.get_context("spawn")
+    q = ctx.Queue()
+    p = ctx.Process(target=_child_call, args=(function_name, kwargs, q))
+    p.start()
+    p.join(timeout_seconds)
+    if p.is_alive():
+        p.terminate()
+        p.join(3)
+        result = {"ok": False, "call_seconds": None, "rows": 0, "data_date": None,
+                  "columns": [], "payload": None,
+                  "error": f"TimeoutError: exceeded {timeout_seconds}s"}
+    else:
+        try:
+            result = q.get(timeout=2)
+        except Exception:
+            result = {"ok": False, "call_seconds": None, "rows": 0, "data_date": None,
+                      "columns": [], "payload": None,
+                      "error": f"WorkerExit: exitcode={p.exitcode}, no result"}
+    q.close()
+    p.close()
+    return result
+
+
+def _calendar_eastmoney():
+    now = datetime.now(TZ)
+    first = now.replace(day=1).date().isoformat()
+    last = (now.date() + timedelta(days=20)).isoformat()
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    params = {
+        "sortColumns": "TRADE_DATE", "sortTypes": "-1", "pageSize": "500",
+        "pageNumber": "1", "reportName": "RPT_TRADE_DATE", "columns": "TRADE_DATE",
+        "filter": f'(TRADE_DATE>="{first}")(TRADE_DATE<="{last}")',
+        "source": "WEB", "client": "WEB",
+    }
+    response = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=(5, 15))
+    response.raise_for_status()
+    records = ((response.json().get("result") or {}).get("data") or [])
+    dates = sorted({d for row in records if (d := _date_from_any(row.get("TRADE_DATE")))})
+    return {
+        "source": "Eastmoney RPT_TRADE_DATE",
+        "dates": dates,
+        "is_trade_day": now.date().isoformat() in dates,
+        "latest_trade_date": max((d for d in dates if d <= now.date().isoformat()), default=None),
+        "error": None,
+    }
+
+
+def _calendar_and_ths_sample():
+    evidence = {"calendar": None, "ths_industry_sample": None, "inferred_date": None,
+                "date_source": "unknown", "error": None}
+    try:
+        evidence["calendar"] = _calendar_eastmoney()
+    except Exception as exc:
+        evidence["calendar"] = {"source": "Eastmoney RPT_TRADE_DATE", "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    try:
+        today = datetime.now(TZ).date()
+        start = (today - timedelta(days=12)).strftime("%Y%m%d")
+        end = today.strftime("%Y%m%d")
+        sample = ak.stock_board_industry_index_ths(
+            symbol="半导体", start_date=start, end_date=end
+        )
+        _, sample_date, columns, _ = _frame_meta(sample)
+        evidence["ths_industry_sample"] = {
+            "symbol": "半导体", "latest_date": sample_date, "columns": columns,
+            "rows": len(sample) if hasattr(sample, "__len__") else None,
+        }
+    except Exception as exc:
+        evidence["ths_industry_sample"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+
+    cal = evidence.get("calendar") or {}
+    sample = evidence.get("ths_industry_sample") or {}
+    latest_cal = cal.get("latest_trade_date")
+    latest_ths = sample.get("latest_date")
+    if latest_cal and latest_ths and latest_cal == latest_ths:
+        evidence["inferred_date"] = latest_cal
+        evidence["date_source"] = "inferred"
+    else:
+        evidence["error"] = "calendar and THS daily-index sample do not agree; date left unknown"
+    return evidence
+
+
+def _source_evidence(function_name, expected_domain):
+    try:
+        fn = getattr(ak, function_name)
+        source = inspect.getsource(fn)
+        domains = sorted(set(re.findall(r"(?:https?://)?(?:[\w.-]+\.)?(?:10jqka\.com\.cn|eastmoney\.com)[\w./?=&%-]*", source)))
+        module = getattr(fn, "__module__", None)
+        expected_found = expected_domain in source
+        return {
+            "module": module, "expected_domain": expected_domain,
+            "source_contains_expected_domain": expected_found,
+            "domain_literals": domains,
+            "source_excerpt": source[:1800],
+            "status": "verified_in_function_source" if expected_found else "not_verified_from_function_source",
+        }
+    except Exception as exc:
+        return {"status": "source_inspection_failed", "error": f"{type(exc).__name__}: {str(exc)[:250]}"}
+
+
+def _redis_client():
+    url = os.environ.get("PROBE_REDIS_URL")
+    if not url:
+        return None, "PROBE_REDIS_URL not configured"
+    try:
+        import redis
+        client = redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=4, socket_timeout=4)
+        client.ping()
+        return client, "connected"
+    except Exception as exc:
+        return None, f"Redis connection failed: {type(exc).__name__}: {str(exc)[:250]}"
+
+
+def _test_one_interface(session_id, spec, date_evidence, redis_client):
+    attempts = []
+    last_good = None
     for i in range(3):
-        started = time.perf_counter()
-        q = ctx.Queue()
-        p = ctx.Process(target=_child_ak_call, args=(name, kwargs, q))
-        p.start()
-        p.join(timeout_seconds)
-        elapsed = round(time.perf_counter() - started, 3)
-        if first is None:
-            first = elapsed
-        if p.is_alive():
-            p.terminate()
-            p.join(3)
-            result = {
-                "ok": False, "rows": 0, "data_date": None, "columns": [],
-                "error": f"TimeoutError: interface exceeded {timeout_seconds}s",
-            }
-        else:
-            try:
-                result = q.get(timeout=1)
-            except Exception:
-                result = {
-                    "ok": False, "rows": 0, "data_date": None, "columns": [],
-                    "error": f"WorkerExit: exitcode={p.exitcode}, no result",
-                }
+        result = _isolated_call(spec["function"], spec["kwargs"])
         attempts.append({
-            "attempt": i + 1,
-            "ok": result["ok"],
-            "seconds": elapsed,
-            "rows": result["rows"],
-            "data_date": result["data_date"],
-            "columns": result["columns"],
+            "attempt": i + 1, "ok": result["ok"],
+            "source_call_seconds": result["call_seconds"],
+            "rows": result["rows"], "source_data_date": result["data_date"],
             "error": result["error"],
         })
-        q.close()
-        p.close()
-    successes = sum(1 for a in attempts if a["ok"])
-    item = {
-        "interface": name,
-        "source": source,
-        "first_request_seconds": first,
-        "success_count_3": successes,
-        "all_three_success": successes == 3,
-        "latest_data_date": max((a["data_date"] for a in attempts if a["data_date"]), default=None),
-        "attempts": attempts,
-        "notes": notes,
-    }
-    with LOCK:
-        REPORT["checks"].append(item)
-    print("[PROBE] " + json.dumps(item, ensure_ascii=False), flush=True)
+        if result["ok"]:
+            last_good = result
 
-
-def _probe_ths_board():
-    _record(
-        "stock_board_industry_summary_ths",
-        lambda: ak.stock_board_industry_summary_ths(),
-        "同花顺",
-        "批量行业板块概况；已返回90条，包含涨跌幅和净流入字段。"
-    )
-    # AkShare has no verified bulk real-time THS concept-board ranking function.
-    REPORT["notes"].append(
-        "未把 stock_board_concept_summary_ths 当作概念涨幅榜：该接口是概念时间表，不是实时涨幅排名。"
-    )
-
-
-def _probe_ths_flows():
-    tests = [
-        ("stock_fund_flow_concept", lambda: ak.stock_fund_flow_concept(symbol="即时"), "同花顺概念资金流"),
-        ("stock_fund_flow_industry", lambda: ak.stock_fund_flow_industry(symbol="即时"), "同花顺行业资金流"),
-        ("stock_fund_flow_individual", lambda: ak.stock_fund_flow_individual(symbol="即时"), "同花顺个股资金流排名"),
-    ]
-    for name, fn, source in tests:
-        if callable(getattr(ak, name, None)):
-            _record_ak(name, {"symbol": "即时"}, source, "按 AkShare 当前公开接口名调用；返回日期缺失时不推断所属交易日。")
-        else:
-            _record(name, lambda: (_ for _ in ()).throw(RuntimeError("function_missing")), source, "当前安装版本未发现该函数。")
-
-
-def _probe_sina_minute():
-    fn = getattr(ak, "stock_zh_a_minute", None)
-    if callable(fn):
-        _record_ak("stock_zh_a_minute", {"symbol": STOCK, "period": "5", "adjust": ""}, "新浪", "新浪分钟K；返回时间列用于核对最近交易日。")
+    source_dates = [a["source_data_date"] for a in attempts if a["source_data_date"]]
+    if source_dates:
+        data_date = max(source_dates)
+        date_source = "source"
     else:
-        _record("stock_zh_a_minute", lambda: (_ for _ in ()).throw(RuntimeError("function_missing")), "新浪")
+        data_date = date_evidence.get("inferred_date")
+        date_source = date_evidence.get("date_source", "unknown") if data_date else "unknown"
 
-
-def _probe_tencent_minute():
-    url = "https://web.ifzq.gtimg.cn/appstock/app/kline/mkline"
-    params = {"param": f"{STOCK},m5,,320"}
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
-    def call():
-        r = requests.get(url, params=params, headers=headers, timeout=(5, 12))
-        r.raise_for_status()
-        data = r.json()
-        node = (data.get("data") or {}).get(STOCK) or {}
-        rows = node.get("m5") or node.get("m5") or []
-        if not rows:
-            raise RuntimeError("Tencent response contains no m5 rows")
-        return rows
-    _record("Tencent web.ifzq m5 minute K", call, "腾讯", "腾讯公开分钟K接口；需检查返回日期和成交量单位。")
-
-
-def _probe_tdx():
-    servers = [
-        ("119.147.212.81", 7709),
-        ("119.147.164.60", 7709),
-        ("124.71.187.122", 7709),
-    ]
-    attempts = []
-    for host, port in servers:
-        t0 = time.perf_counter()
-        try:
-            with socket.create_connection((host, port), timeout=4):
-                attempts.append({"host": host, "port": port, "ok": True, "seconds": round(time.perf_counter()-t0, 3), "error": None})
-        except Exception as exc:
-            attempts.append({"host": host, "port": port, "ok": False, "seconds": round(time.perf_counter()-t0, 3), "error": f"{type(exc).__name__}: {str(exc)[:250]}"})
+    now = datetime.now(TZ).isoformat()
     item = {
-        "interface": "通达信 TCP connectivity",
-        "source": "通达信公开行情节点",
-        "first_request_seconds": attempts[0]["seconds"] if attempts else None,
+        "interface": spec["label"], "function": spec["function"],
+        "source_claim": spec["source"], "source_evidence": _source_evidence(
+            spec["function"], spec["expected_domain"]
+        ),
+        "session_id": session_id, "attempts": attempts,
         "success_count_3": sum(1 for a in attempts if a["ok"]),
-        "all_three_success": all(a["ok"] for a in attempts),
-        "latest_data_date": None,
-        "attempts": attempts,
-        "notes": "仅验证 Render 出站 TCP 连通性，不代表已完成通达信协议握手或行情解析。",
+        "first_source_call_seconds": next((a["source_call_seconds"] for a in attempts if a["source_call_seconds"] is not None), None),
+        "data_date": data_date, "date_source": date_source,
+        "date_evidence": date_evidence, "fetched_at": now,
+        "cache": {"status": "skipped", "reason": "no successful source response" if not last_good else None},
+    }
+
+    if last_good and redis_client:
+        key = f"ashare_probe:{session_id}:{spec['key']}"
+        envelope = {
+            "data": json.loads(last_good["payload"]),
+            "data_date": data_date,
+            "date_source": date_source,
+            "fetched_at": now,
+            "source": spec["source"],
+        }
+        try:
+            t0 = time.perf_counter()
+            redis_client.setex(key, 3600, json.dumps(envelope, ensure_ascii=False, default=str))
+            write_seconds = round(time.perf_counter() - t0, 6)
+            hit_times = []
+            for _ in range(3):
+                t0 = time.perf_counter()
+                cached = redis_client.get(key)
+                if cached is None:
+                    raise RuntimeError("cache key missing after SETEX")
+                json.loads(cached)
+                hit_times.append(round(time.perf_counter() - t0, 6))
+            item["cache"] = {
+                "status": "redis_tested", "write_seconds": write_seconds,
+                "hit_seconds": hit_times, "first_hit_seconds": hit_times[0],
+                "average_hit_seconds": round(sum(hit_times) / len(hit_times), 6),
+                "ttl_seconds": 3600, "cache_key": key,
+                "fetched_at_preserved": json.loads(cached).get("fetched_at") == now,
+            }
+        except Exception as exc:
+            item["cache"] = {"status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    elif last_good:
+        item["cache"] = {"status": "skipped", "reason": "Redis not configured"}
+
+    print("[SESSION_PROBE] " + json.dumps(item, ensure_ascii=False), flush=True)
+    return item
+
+
+def run_session(session_id):
+    now = datetime.now(TZ)
+    date_evidence = _calendar_and_ths_sample()
+    redis_client, redis_status = _redis_client()
+    specs = [
+        {"key": "ths_industry_board", "label": "THS行业板块榜", "function": "stock_board_industry_summary_ths",
+         "kwargs": {}, "source": "同花顺", "expected_domain": "10jqka.com.cn"},
+        {"key": "em_industry_board", "label": "EM行业板块榜", "function": "stock_board_industry_name_em",
+         "kwargs": {}, "source": "东方财富", "expected_domain": "eastmoney.com"},
+        {"key": "ths_industry_flow", "label": "THS行业资金流", "function": "stock_fund_flow_industry",
+         "kwargs": {"symbol": "即时"}, "source": "同花顺", "expected_domain": "10jqka.com.cn"},
+        {"key": "em_industry_flow", "label": "EM行业资金流", "function": "stock_sector_fund_flow_rank",
+         "kwargs": {"indicator": "今日", "sector_type": "行业资金流"}, "source": "东方财富", "expected_domain": "eastmoney.com"},
+        {"key": "ths_concept_flow", "label": "THS概念资金流", "function": "stock_fund_flow_concept",
+         "kwargs": {"symbol": "即时"}, "source": "同花顺", "expected_domain": "10jqka.com.cn"},
+        {"key": "em_concept_flow", "label": "EM概念资金流", "function": "stock_sector_fund_flow_rank",
+         "kwargs": {"indicator": "今日", "sector_type": "概念资金流"}, "source": "东方财富", "expected_domain": "eastmoney.com"},
+    ]
+    results = []
+    print(f"[SESSION] START {session_id} at {now.isoformat()} Redis={redis_status}", flush=True)
+    for spec in specs:
+        results.append(_test_one_interface(session_id, spec, date_evidence, redis_client))
+    session_result = {
+        "session_id": session_id, "started_at": now.isoformat(),
+        "completed_at": datetime.now(TZ).isoformat(),
+        "calendar_and_index_evidence": date_evidence,
+        "redis_status": redis_status, "checks": results,
+        "individual_stock_flow": {
+            "status": "pending_user_stock_codes",
+            "note": "Full-market stock_fund_flow_individual is abandoned after 3/3 25-second timeouts. Candidate is one-by-one stock_individual_fund_flow(stock, market), pending a small user-specified code list."
+        },
     }
     with LOCK:
-        REPORT["checks"].append(item)
-    print("[PROBE] " + json.dumps(item, ensure_ascii=False), flush=True)
+        REPORT["sessions"].append(session_result)
+        COMPLETED.add(session_id)
+        RUNNING.discard(session_id)
+    print("[SESSION] COMPLETE " + json.dumps(session_result, ensure_ascii=False), flush=True)
 
 
-def _probe_baostock():
-    try:
-        import baostock as bs
-    except Exception as exc:
-        _record("BaoStock daily K after-close fallback", lambda exc=exc: (_ for _ in ()).throw(exc), "BaoStock", "依赖导入失败。")
-        return
-    login = bs.login()
-    if getattr(login, "error_code", "1") != "0":
-        _record("BaoStock daily K after-close fallback", lambda: (_ for _ in ()).throw(RuntimeError(f"login {login.error_code}: {login.error_msg}")), "BaoStock", "仅盘后兜底；登录失败。")
-        return
-    def query():
-        rs = bs.query_history_k_data_plus(
-            "sh.600519",
-            "date,code,open,high,low,close,volume,amount",
-            start_date=(datetime.now(TZ) - timedelta(days=12)).strftime("%Y-%m-%d"),
-            end_date=datetime.now(TZ).strftime("%Y-%m-%d"),
-            frequency="d",
-            adjustflag="2",
-        )
-        rows = []
-        while rs.error_code == "0" and rs.next():
-            rows.append(rs.get_row_data())
-        if rs.error_code != "0":
-            raise RuntimeError(f"{rs.error_code}: {rs.error_msg}")
-        if not rows:
-            raise RuntimeError("BaoStock returned no daily rows")
-        return [{"date": r[0]} for r in rows]
-    try:
-        _record("BaoStock daily K after-close fallback", query, "BaoStock", "仅盘后兜底链；不用于盘中分钟K或实时行情。")
-    finally:
-        bs.logout()
-
-
-def run_probes():
-    print("[PROBE] starting Render data-source checks", flush=True)
-    _probe_ths_board()
-    _probe_ths_flows()
-    _probe_sina_minute()
-    _probe_tencent_minute()
-    _probe_tdx()
-    _probe_baostock()
-    with LOCK:
-        REPORT["completed_at"] = datetime.now(TZ).isoformat()
-        REPORT["complete"] = True
-    print("[PROBE] COMPLETE " + json.dumps(REPORT, ensure_ascii=False), flush=True)
+def _maybe_start_scheduled_session():
+    now = datetime.now(TZ)
+    day = now.date().isoformat()
+    slots = SCHEDULE.get(day, {})
+    for slot, (start, end) in slots.items():
+        if start <= now.time().replace(tzinfo=None) <= end:
+            session_id = f"{day}:{slot}"
+            with LOCK:
+                if session_id in RUNNING or session_id in COMPLETED:
+                    return
+                RUNNING.add(session_id)
+            threading.Thread(target=run_session, args=(session_id,), daemon=True).start()
+            return
 
 
 async def health(request):
-    return JSONResponse({"status": "ok", "probe_complete": REPORT["complete"]})
+    _maybe_start_scheduled_session()
+    with LOCK:
+        running = sorted(RUNNING)
+        completed = sorted(COMPLETED)
+    return JSONResponse({
+        "status": "ok", "service": "board-flow-probe",
+        "scheduled_days": sorted(SCHEDULE.keys()),
+        "running_sessions": running, "completed_sessions": completed,
+        "timezone": "Asia/Shanghai",
+    })
 
 
 async def results(request):
@@ -342,7 +373,5 @@ app = Starlette(routes=[
 
 
 if __name__ == "__main__":
-    threading.Thread(target=run_probes, daemon=True).start()
-    import os
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
