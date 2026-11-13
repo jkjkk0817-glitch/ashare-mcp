@@ -2,8 +2,9 @@ name: Production keepalive (scheduled, disabled by default)
 
 on:
   # GitHub Actions cron uses UTC. 00:40-07:40 UTC = 08:40-15:40 China time.
-  schedule:
-    - cron: "40 0-7 * * 1-5"
+  # DISABLED: uncomment the two lines below when you are ready to activate.
+  # schedule:
+  #   - cron: "40 0-7 * * 1-5"
   # Manual dispatch is intentionally harmless: the job condition below
   # only permits scheduled events, never workflow_dispatch.
   workflow_dispatch:
@@ -17,8 +18,8 @@ concurrency:
 
 jobs:
   warm-production-root:
-    # SAFETY LOCK: hard-disabled. To activate, remove "false &&" from the
-    # condition below. Manual workflow_dispatch remains blocked after activation.
+    # SAFETY LOCK: hard-disabled. To activate, uncomment the schedule above
+    # and remove "false &&" from the condition below. Manual dispatch stays blocked.
     if: ${{ false && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     timeout-minutes: 8
