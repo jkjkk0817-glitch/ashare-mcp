@@ -281,6 +281,7 @@ def _test_one_interface(session_id, spec, date_evidence, redis_client):
         "success_count_3": sum(1 for a in attempts if a["ok"]),
         "first_source_call_seconds": next((a["source_call_seconds"] for a in attempts if a["source_call_seconds"] is not None), None),
         "data_date": data_date, "date_source": date_source,
+        "session_final": bool(date_evidence.get("session_final")) if session_id.endswith(":after_close") else False,
         "date_evidence": date_evidence, "fetched_at": now,
         "cache": {"status": "skipped", "reason": "no successful source response" if not last_good else None},
     }
@@ -291,6 +292,7 @@ def _test_one_interface(session_id, spec, date_evidence, redis_client):
             "data": json.loads(last_good["payload"]),
             "data_date": data_date,
             "date_source": date_source,
+            "session_final": item["session_final"],
             "fetched_at": now,
             "source": spec["source"],
         }
@@ -347,7 +349,8 @@ def run_session(session_id):
     session_result = {
         "session_id": session_id, "started_at": now.isoformat(),
         "completed_at": datetime.now(TZ).isoformat(),
-        "date_evidence": date_evidence,\n        "session_final": bool(date_evidence.get("session_final")) if session_id.endswith(":after_close") else False,
+        "date_evidence": date_evidence,
+        "session_final": bool(date_evidence.get("session_final")) if session_id.endswith(":after_close") else False,
         "redis_status": redis_status, "checks": results,
         "individual_stock_flow": {
             "status": "pending_user_stock_codes",
