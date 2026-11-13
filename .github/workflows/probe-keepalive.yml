@@ -24,14 +24,15 @@ jobs:
         run: |
           set -u
           URL="https://ashare-mcp-data-probe.onrender.com/health"
-          NOW="$(date -u +%H%M)"
+          NOW_RAW="$(date -u +%H%M)"
+          NOW=$((10#$NOW_RAW))
 
           # Morning window ends 02:45 UTC (10:45 China).
           # Afternoon window ends 07:50 UTC (15:50 China).
           if [ "$NOW" -lt 0400 ]; then
-            END=0245
+            END=245
           elif [ "$NOW" -lt 0800 ]; then
-            END=0750
+            END=750
           else
             echo "This run started outside a planned keepalive window; exiting."
             exit 0
