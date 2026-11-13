@@ -38,7 +38,7 @@ REPORT = {
         "Minute K, TDX, and BaoStock checks are intentionally paused.",
         "No project Redis cache is bypassed by pretending to disable upstream/CDN caches; direct means no project Redis read.",
         "A missing interface date is inferred only when Sina Shanghai Composite daily K and THS industry daily-index sample agree; no Eastmoney trading calendar is used.",
-        "session_final is false intraday and becomes true only after close when both independent daily sources confirm the current trading date."
+        "session_final is false intraday and becomes true only after close when both independent daily sources confirm the current trading date.",
         "Redis cache timing is measured only when PROBE_REDIS_URL is configured; otherwise cache timing is marked skipped.",
     ],
 }
