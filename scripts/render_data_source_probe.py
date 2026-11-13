@@ -167,13 +167,16 @@ def _calendar_and_ths_sample():
         today = datetime.now(TZ).date()
         start = (today - timedelta(days=12)).strftime("%Y%m%d")
         end = today.strftime("%Y%m%d")
-        sample = ak.stock_board_industry_index_ths(
-            symbol="半导体", start_date=start, end_date=end
+        sample_result = _isolated_call(
+            "stock_board_industry_index_ths",
+            {"symbol": "半导体", "start_date": start, "end_date": end},
+            timeout_seconds=60,
         )
-        _, sample_date, columns, _ = _frame_meta(sample)
         evidence["ths_industry_sample"] = {
-            "symbol": "半导体", "latest_date": sample_date, "columns": columns,
-            "rows": len(sample) if hasattr(sample, "__len__") else None,
+            "symbol": "半导体", "latest_date": sample_result.get("data_date"),
+            "columns": sample_result.get("columns", []),
+            "rows": sample_result.get("rows", 0),
+            "error": sample_result.get("error"),
         }
     except Exception as exc:
         evidence["ths_industry_sample"] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
@@ -340,9 +343,21 @@ def _maybe_start_scheduled_session():
     for slot, (start, end) in slots.items():
         if start <= now.time().replace(tzinfo=None) <= end:
             session_id = f"{day}:{slot}"
+            redis_client, _ = _redis_client()
             with LOCK:
                 if session_id in RUNNING or session_id in COMPLETED:
                     return
+                if redis_client:
+                    try:
+                        acquired = redis_client.set(
+                            f"ashare_probe:scheduled:{session_id}", "started",
+                            nx=True, ex=7200
+                        )
+                        if not acquired:
+                            COMPLETED.add(session_id)
+                            return
+                    except Exception:
+                        pass
                 RUNNING.add(session_id)
             threading.Thread(target=run_session, args=(session_id,), daemon=True).start()
             return
