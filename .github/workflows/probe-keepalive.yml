@@ -1,0 +1,49 @@
+name: Temporary Render probe keepalive
+
+on:
+  schedule:
+    # China time 09:55 and 15:05; GitHub cron is UTC.
+    - cron: "55 1 13,16,17 11 *"
+    - cron: "5 7 13,16,17 11 *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ashare-probe-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Poll probe health during the scheduled window
+        shell: bash
+        run: |
+          set -u
+          URL="https://ashare-mcp-data-probe.onrender.com/health"
+          NOW="$(date -u +%H%M)"
+
+          # Morning window ends 02:45 UTC (10:45 China).
+          # Afternoon window ends 07:50 UTC (15:50 China).
+          if [ "$NOW" -lt 0400 ]; then
+            END=0245
+          elif [ "$NOW" -lt 0800 ]; then
+            END=0750
+          else
+            echo "This run started outside a planned keepalive window; exiting."
+            exit 0
+          fi
+
+          echo "Keepalive started at $(date -u --iso-8601=seconds); stop at ${END} UTC."
+          while [ "$(date -u +%H%M)" -lt "$END" ]; do
+            echo "Requesting /health at $(date -u --iso-8601=seconds)"
+            if ! curl --fail --silent --show-error --max-time 20 "$URL"; then
+              echo "Health request failed; next poll will retry."
+            fi
+            echo
+            sleep 180
+          done
+          echo "Keepalive window ended at $(date -u --iso-8601=seconds)."
