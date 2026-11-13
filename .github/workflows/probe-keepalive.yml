@@ -29,9 +29,9 @@ jobs:
 
           # Morning window ends 02:45 UTC (10:45 China).
           # Afternoon window ends 07:50 UTC (15:50 China).
-          if [ "$NOW" -lt 0400 ]; then
+          if [ "$NOW" -lt 400 ]; then
             END=245
-          elif [ "$NOW" -lt 0800 ]; then
+          elif [ "$NOW" -lt 800 ]; then
             END=750
           else
             echo "This run started outside a planned keepalive window; exiting."
@@ -39,12 +39,16 @@ jobs:
           fi
 
           echo "Keepalive started at $(date -u --iso-8601=seconds); stop at ${END} UTC."
-          while [ "$(date -u +%H%M)" -lt "$END" ]; do
+          CUR_RAW="$(date -u +%H%M)"
+          CUR=$((10#$CUR_RAW))
+          while [ "$CUR" -lt "$END" ]; do
             echo "Requesting /health at $(date -u --iso-8601=seconds)"
             if ! curl --fail --silent --show-error --max-time 20 "$URL"; then
               echo "Health request failed; next poll will retry."
             fi
             echo
             sleep 180
+            CUR_RAW="$(date -u +%H%M)"
+            CUR=$((10#$CUR_RAW))
           done
           echo "Keepalive window ended at $(date -u --iso-8601=seconds)."
