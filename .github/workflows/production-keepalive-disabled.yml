@@ -1,10 +1,10 @@
 name: Production keepalive (scheduled, disabled by default)
 
 on:
-  # GitHub Actions cron uses UTC. 00:40-07:40 UTC = 08:40-15:40 China time.
-  # DISABLED: uncomment the two lines below when you are ready to activate.
+  # Planned schedule: 00:15 UTC = 08:15 China time, Monday-Friday.
+  # DISABLED: uncomment the two lines below only when you decide to activate.
   # schedule:
-  #   - cron: "40 0-7 * * 1-5"
+  #   - cron: "15 0 * * 1-5"
   # Manual dispatch is intentionally harmless: the job condition below
   # only permits scheduled events, never workflow_dispatch.
   workflow_dispatch:
@@ -22,9 +22,9 @@ jobs:
     # and remove "false &&" from the condition below. Manual dispatch stays blocked.
     if: ${{ false && github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 20
     steps:
-      - name: Send exactly two root requests and log timestamps, status codes, and latency
+      - name: Send exactly three root requests at +0, +7, and +14 minutes
         shell: bash
         run: |
           set -uo pipefail
@@ -51,8 +51,11 @@ jobs:
           }
 
           echo "Target: production root URL only; no /mcp path and no data-tool calls."
-          send_request "warmup_1"
-          echo "Waiting approximately 3 minutes before the second request."
-          sleep 180
-          send_request "warmup_2"
-          echo "Two-request warmup finished; no further requests will be sent by this run."
+          send_request "warmup_1_at_plus_0m"
+          echo "Waiting 7 minutes until the second request."
+          sleep 420
+          send_request "warmup_2_at_plus_7m"
+          echo "Waiting 7 minutes until the third request."
+          sleep 420
+          send_request "warmup_3_at_plus_14m"
+          echo "Three-request warmup finished; no further requests will be sent by this run."
