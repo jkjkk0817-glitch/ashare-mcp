@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from typing import Literal
 
+from loguru import logger
+
 from ..app import mcp
 from ..cache import cached, ttl_intraday_official
 from ..data_sources import akshare_src as ak
+from ..data_sources import ths_flow
+from ..data_sources._base import DataUnavailableError, EmptyDataError
 from ._helpers import (
     DISCLAIMER_FUNDFLOW,
     DISCLAIMER_NOT_ADVICE,
@@ -21,6 +25,12 @@ from ._helpers import (
     ok,
 )
 from ..utils.freshness import latest_record_date, data_age_days, MARKET_FLOW_MAX_AGE_DAYS
+
+
+DISCLAIMER_THS_FLOW = (
+    "【口径警告】同花顺资金流的流入/流出/净额与东方财富主力净流入口径不同，"
+    "不可混用比较，仅供参考，不代表真实机构意图。"
+)
 
 
 @mcp.tool
@@ -103,11 +113,36 @@ def get_sector_fund_flow_rank(
     limit: 返回数量。
     """
     n = clamp_limit(limit)
-    data = ak.sector_fund_flow_rank(
-        period,
-        sector_type,
-        limit=n,
-    )
+    try:
+        data = ak.sector_fund_flow_rank(
+            period,
+            sector_type,
+            limit=n,
+        )
+    except (DataUnavailableError, EmptyDataError) as em_exc:
+        logger.warning(f"东方财富板块资金流不可用，改用同花顺备用通道: {em_exc}")
+        try:
+            data = ths_flow.sector_fund_flow(period, sector_type, limit=n)
+        except (DataUnavailableError, EmptyDataError) as ths_exc:
+            raise DataUnavailableError(
+                f"东方财富失败: {em_exc}; 同花顺备用通道失败: {ths_exc}"
+            ) from ths_exc
+        return ok(
+            data,
+            period=period,
+            sector_type=sector_type,
+            count=len(data),
+            source="akshare / 同花顺（东方财富不可用时的备用通道）",
+            fallback_used=True,
+            amount_unit="CNY",
+            data_date=None,
+            caveat=(
+                "同花顺口径与东方财富主力净流入不同，数值不可与东财数据混用或比较；"
+                "同花顺页面不提供数据日期，盘后按最近一个交易日理解，使用时须结合行情日期核对。"
+            ),
+            disclaimer=DISCLAIMER_THS_FLOW,
+            note=DISCLAIMER_NOT_ADVICE,
+        )
     return ok(
         data,
         period=period,
