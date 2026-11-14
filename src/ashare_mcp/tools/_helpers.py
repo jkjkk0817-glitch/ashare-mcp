@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from loguru import logger
 
+from .. import snapshot
 from ..config import settings
 from ..data_sources._base import DataUnavailableError, EmptyDataError
 
@@ -43,20 +44,39 @@ def err(code: str, detail: str = "", suggestion: str = "") -> dict:
     return {"ok": False, "error": code, "detail": str(detail), "suggestion": suggestion}
 
 
+def _snapshot_args(sig: inspect.Signature, a: tuple, k: dict) -> dict:
+    """Bound arguments (defaults applied) used as the snapshot key."""
+    try:
+        bound = sig.bind(*a, **k)
+        bound.apply_defaults()
+        return dict(bound.arguments)
+    except TypeError:
+        return {"_a": list(a), "_k": dict(k)}
+
+
 def guard(fn: Callable) -> Callable:
     """Wrap a tool so no exception ever escapes to the MCP framework.
 
     Returns a structured error dict on failure (PRD §错误处理). Preserves the wrapped
     signature/annotations so FastMCP can still infer the tool schema.
+
+    Snapshots: a successful result is saved; when the data source is unavailable the
+    last successful result of the same call is returned, labelled ``stale=True`` with
+    its save time. Empty results (``no_data``) never fall back to a snapshot.
     """
     sig = inspect.signature(fn)
 
     @functools.wraps(fn)
     def wrapper(*a, **k):
+        snap_args = _snapshot_args(sig, a, k)
         try:
-            return fn(*a, **k)
+            result = fn(*a, **k)
         except DataUnavailableError as e:
             logger.warning(f"{fn.__name__} data_source_unavailable: {e}")
+            snap = snapshot.load(fn.__name__, snap_args)
+            if snap is not None:
+                logger.warning(f"{fn.__name__} serving stale snapshot saved at {snap.get('saved_at')}")
+                return snapshot.as_stale(snap, f"data_source_unavailable: {e}")
             return err("data_source_unavailable", str(e),
                        "请稍后重试,或检查网络 / akshare 版本(可 uv run ashare-mcp 查看启动 banner)")
         except EmptyDataError as e:
@@ -69,6 +89,8 @@ def guard(fn: Callable) -> Callable:
         except Exception as e:  # noqa: BLE001 - never let it reach the framework
             logger.exception(f"{fn.__name__} internal_error")
             return err("internal_error", f"{type(e).__name__}: {e}", "请稍后重试")
+        snapshot.save(fn.__name__, snap_args, result)
+        return result
 
     wrapper.__wrapped__ = fn
     wrapper.__signature__ = sig
