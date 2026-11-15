@@ -11,21 +11,18 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from ..app import mcp
-from ..cache import cached, ttl_intraday_official
+from ..cache import cached, in_trading_session, now_cn, ttl_session_aware_daily
 from ..data_sources import akshare_src as ak
 from ..data_sources import baostock_src as bs
 from ..data_sources._base import DataSourceError, EmptyDataError
 from ..utils import codes, dates
 from ._helpers import DISCLAIMER_NOT_ADVICE, clamp_limit, guard, ok
-
-_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 # 追高预警阈值（与自动化任务提示词一致）
 CHASE_RET_5D = 15.0
@@ -268,7 +265,7 @@ def _fetch_daily(symbol: str, start: str, end: str) -> tuple[list[dict], str]:
 
 @mcp.tool
 @guard
-@cached(ttl=ttl_intraday_official)
+@cached(ttl=ttl_session_aware_daily)
 def get_stock_pack(symbol: str, bars: int = 120) -> dict:
     """获取一只股票的日线技术数据包（每只候选只需调用一次）。
 
@@ -277,7 +274,8 @@ def get_stock_pack(symbol: str, bars: int = 120) -> dict:
     deviation_ma20_pct、range(近20/60日高低点)、supports/resistances(技术位候选，
     注明依据: 均线/区间高低点)、chase_checks(追高预警逐项结果)、bars(K线根数与日期)。
     口径: 前复权日K，主源 akshare，失败降级 baostock。
-    注意: 价格为最近一个交易日收盘，不是实时价；不含资金流、公告。
+    注意: 价格为日K收盘（盘中为未收盘的当日K线），不是实时价；盘中请搭配
+    get_verified_quote 取当前价；不含资金流、公告。
     参数:
       symbol: 股票代码(多种写法均可)。
       bars: 取最近多少根日K，默认120，范围60-250。
@@ -285,7 +283,7 @@ def get_stock_pack(symbol: str, bars: int = 120) -> dict:
     sym = codes.normalize(symbol)
     n_bars = max(60, min(clamp_limit(bars, default=120, maximum=250), 250))
 
-    today_cn = datetime.now(_SHANGHAI).date()
+    today_cn = now_cn().date()
     expected_last = dates.latest_trade_date(today_cn)
     start = (expected_last - timedelta(days=int(n_bars * 1.6) + 10)).strftime("%Y-%m-%d")
     end = expected_last.strftime("%Y-%m-%d")
@@ -297,17 +295,27 @@ def get_stock_pack(symbol: str, bars: int = 120) -> dict:
 
     last_date = pack["bars"]["last_date"]
     lag = last_date < end
+    session = in_trading_session()
+    partial = bool(session and last_date == today_cn.strftime("%Y-%m-%d"))
     return ok(
         pack,
         symbol=sym,
         source=source,
         adjust="qfq",
-        price_basis="最近一个交易日日K收盘，非实时价",
+        price_basis="日K收盘价（盘中为未收盘的当日K线），非实时价",
         expected_last_trade_date=end,
         kline_lag=bool(lag),
         kline_lag_note=(
             f"日K最新日期{last_date}落后于最近交易日{end}，不得称为最新完整日K。"
             if lag else None
+        ),
+        market_session="trading" if session else "closed",
+        last_bar_partial=partial,
+        intraday_note=(
+            "盘中：最后一根日K是未收盘的当日K线，收盘价、涨跌幅、均线、成交额、"
+            "追高检验均含未完成数据；当前价请以 get_verified_quote 为准，"
+            "支撑压力位以此前已完成K线为主要参考。"
+            if partial else None
         ),
         note=DISCLAIMER_NOT_ADVICE,
     )
