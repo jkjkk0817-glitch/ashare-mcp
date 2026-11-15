@@ -27,7 +27,10 @@ INDEX_MAP = [
     ("sh000852", "中证1000"),
 ]
 
-RULE_TEXT = "名称一致、行情日期一致、两来源行情时间相差<=180秒、价格偏差<=0.3%（以腾讯价为基准）"
+RULE_TEXT = (
+    "名称一致、行情日期一致、价格偏差<=0.3%（以腾讯价为基准）；盘中两来源行情时间相差<=180秒；"
+    "收盘后两来源时间戳均在15:00之后时视为收盘数据，不比较时间差（time_rule=post_close）"
+)
 
 
 def _iso(dt) -> str | None:
@@ -70,6 +73,7 @@ def _merge_row(prefixed: str, tencent: dict | None, sina: dict | None) -> dict:
         "quote_age_seconds": age_seconds,
         "price_diff_pct": check["price_diff_pct"],
         "time_diff_seconds": check["time_diff_seconds"],
+        "time_rule": check.get("time_rule"),
         "primary_source": "腾讯财经" if tencent else "新浪财经",
         "sources": {"tencent": _source_view(tencent), "sina": _source_view(sina)},
     }
@@ -93,7 +97,8 @@ def get_verified_quote(symbols: list[str]) -> dict:
     每只返回: price(腾讯价为基准)、pct_change、quote_time(行情时间，北京时间)、
     verified(是否通过双源核验)、verify_reasons(未通过原因)、price_diff_pct、
     time_diff_seconds、sources(两个来源各自的价格与时间)、warnings。
-    核验标准: 名称一致、行情日期一致、行情时间相差<=180秒、价格偏差<=0.3%。
+    核验标准: 名称一致、行情日期一致、价格偏差<=0.3%；盘中行情时间相差<=180秒，
+    收盘后（两来源时间戳均在15:00之后）不比较时间差，time_rule=post_close。
     非交易时段返回最近一个交易日的收盘价和收盘时间，同样做双源核验。
     不做快照；两个来源都失败时直接报错，不返回旧价格。
     参数: symbols: 股票代码列表(多种写法均可)，如 ["600919", "601009"]。
