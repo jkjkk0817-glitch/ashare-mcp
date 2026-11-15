@@ -1,0 +1,46 @@
+name: Production keepalive (trading hours)
+
+on:
+  # Every 6 minutes, 09:00-15:59 Beijing time (01:00-07:59 UTC), Monday to Friday.
+  # Render's free instance sleeps after ~15 idle minutes, so this keeps it awake
+  # while the market is open. Scheduled runs can be delayed by GitHub, hence 6 min.
+  schedule:
+    - cron: "*/6 1-7 * * 1-5"
+
+  # Manual runs are blocked by the job condition.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ashare-production-keepalive-trading
+  cancel-in-progress: true
+
+jobs:
+  ping-production-root:
+    # Only scheduled events can run this job.
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: One root request
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          URL="https://ashare-mcp-1otc.onrender.com/"
+
+          utc_ts="$(date -u --iso-8601=seconds)"
+          china_ts="$(TZ=Asia/Shanghai date --iso-8601=seconds)"
+
+          set +e
+          result="$(curl --silent --show-error --output /dev/null \
+            --write-out 'http_status=%{http_code} elapsed_seconds=%{time_total}' \
+            --connect-timeout 20 --max-time 90 "$URL" 2>&1)"
+          curl_rc=$?
+          set -e
+
+          echo "utc_timestamp=$utc_ts china_timestamp=$china_ts $result curl_exit=$curl_rc"
+          echo "Target: production root URL only. No /mcp path and no data-tool calls."
