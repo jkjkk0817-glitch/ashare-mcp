@@ -1,7 +1,7 @@
 """get_stock_pack —— 一次调用返回一只股票的"日线技术数据包"。
 
 目的：让自动化任务对每只候选只调用一次，就拿到收盘价、涨跌幅、均线、阶段涨幅、
-支撑压力位候选和追高检验数据，减少调用次数和失败点。
+支撑压力位候选、参考计划（买入区间、止损、止盈、盈亏比）和追高检验数据，减少调用次数和失败点。
 
 只使用日K（主源 akshare，失败降级 baostock，口径为前复权）。
 不含实时行情、资金流、公告；这些仍用对应工具单独获取。
@@ -132,6 +132,83 @@ def _levels(close: float, ma: dict, highs: dict, lows: dict) -> tuple[list, list
     return dedupe(supports), dedupe(resistances)
 
 
+def _price_zone(high: float, ratio_low: float = 0.99) -> dict:
+    return {"low": round(high * ratio_low, 2), "high": round(high, 2)}
+
+
+def _reference_plan(close: float, supports: list[dict], resistances: list[dict]) -> dict:
+    """由支撑压力位机械推出的参考计划（固定规则，同样的数据永远得到同样的结果）。
+
+    买入区间 = 第一支撑 ×0.995 ~ min(收盘价, 第一支撑 ×1.01)
+    止损     = 前三个支撑中最低者 ×0.995；只有一个支撑时 = 该支撑 ×0.97
+    止盈1/2  = 最近两个压力位，区间为压力位 ×0.99 ~ 压力位；没有压力位则缺失
+    计划盈亏比 = (止盈1下沿 - 买入区间上沿) ÷ (买入区间上沿 - 止损)
+    仓位上限(风险预算口径) = 2% ÷ max(止损距离+3个百分点, 5%)
+    """
+    if not supports:
+        return {
+            "available": False,
+            "reason": "收盘价下方没有任何均线或区间低点可作支撑，无法生成参考计划",
+        }
+
+    s1 = supports[0]["price"]
+    buy_low = round(s1 * 0.995, 2)
+    buy_high = round(min(close, s1 * 1.01), 2)
+
+    lowest = supports[min(2, len(supports) - 1)]["price"]
+    if len(supports) == 1 or lowest >= s1:
+        stop = round(s1 * 0.97, 2)
+        stop_basis = f"仅一个支撑({supports[0]['basis']} {s1})，按其下方3%"
+    else:
+        stop = round(lowest * 0.995, 2)
+        stop_basis = f"前三支撑中最低的{supports[min(2, len(supports) - 1)]['basis']} {lowest}下方0.5%"
+
+    stop_distance_pct = (buy_high - stop) / buy_high * 100 if buy_high else None
+
+    # 止盈区间必须整体高于买入区间上沿；压力位太近（区间下沿不高于买入上沿）的跳过
+    usable = [r for r in resistances if round(r["price"] * 0.99, 2) > buy_high]
+    skipped = [r for r in resistances if r not in usable]
+    tp1 = tp2 = None
+    if usable:
+        tp1 = {**_price_zone(usable[0]["price"]), "basis": usable[0]["basis"]}
+    if len(usable) > 1:
+        tp2 = {**_price_zone(usable[1]["price"]), "basis": usable[1]["basis"]}
+
+    rr = None
+    if tp1 and stop_distance_pct and buy_high > stop:
+        rr = (tp1["low"] - buy_high) / (buy_high - stop)
+
+    position_cap = None
+    if stop_distance_pct is not None:
+        stress = max(stop_distance_pct + 3.0, 5.0)
+        position_cap = 2.0 / stress * 100.0
+
+    notes = []
+    if skipped:
+        names = "、".join(f"{r['basis']} {r['price']}" for r in skipped)
+        notes.append(f"压力位{names}距买入区间上沿不足1%，已跳过")
+    if tp1 is None:
+        notes.append("上方没有可用的技术压力位（接近阶段新高），止盈位缺失，不得估算后冒充技术位")
+    if stop_distance_pct is not None and stop_distance_pct > 6.0:
+        notes.append("止损距离超过6%，按规则应放弃或降为条件触发")
+
+    return {
+        "available": True,
+        "buy_zone": {"low": buy_low, "high": buy_high,
+                     "basis": f"第一支撑{supports[0]['basis']} {s1}附近"},
+        "stop": stop,
+        "stop_basis": stop_basis,
+        "stop_distance_pct": _round(stop_distance_pct),
+        "stop_too_far": bool(stop_distance_pct is not None and stop_distance_pct > 6.0),
+        "take_profit_1": tp1,
+        "take_profit_2": tp2,
+        "rr": _round(rr),
+        "position_cap_by_risk_pct": _round(position_cap, 1),
+        "notes": notes,
+        "rule": "机械计算的参考计划，不构成建议；仅对下一交易日（盘前）或当日（盘中）有效",
+    }
+
+
 def compute_pack(records: list[dict]) -> dict:
     """由日K记录计算数据包。纯函数，便于离线测试。"""
     df = pd.DataFrame(records)
@@ -245,6 +322,7 @@ def compute_pack(records: list[dict]) -> dict:
         "volume_ratio_5_20": _round(volume_ratio_5_20, 2),
         "supports": supports,
         "resistances": resistances,
+        "reference_plan": _reference_plan(last_close, supports, resistances),
         "chase_checks": chase_checks,
         "chase_triggered": chase_triggered,
         "bars": {
@@ -272,7 +350,9 @@ def get_stock_pack(symbol: str, bars: int = 120) -> dict:
     返回 data: last_bar(最近一根日K: 日期/收盘/涨跌幅/成交额/换手率/是否涨停)、
     ma(MA5/10/20/60)、ma20_direction、returns_pct(近5/10/20/60日涨幅)、
     deviation_ma20_pct、range(近20/60日高低点)、supports/resistances(技术位候选，
-    注明依据: 均线/区间高低点)、chase_checks(追高预警逐项结果)、bars(K线根数与日期)。
+    注明依据: 均线/区间高低点)、reference_plan(按固定规则由支撑压力位推出的买入区间、
+    止损、止盈1/2、计划盈亏比rr、风险预算仓位上限，同样数据永远得到同样结果)、
+    chase_checks(追高预警逐项结果)、bars(K线根数与日期)。
     口径: 前复权日K，主源 akshare，失败降级 baostock。
     注意: 价格为日K收盘（盘中为未收盘的当日K线），不是实时价；盘中请搭配
     get_verified_quote 取当前价；不含资金流、公告。
