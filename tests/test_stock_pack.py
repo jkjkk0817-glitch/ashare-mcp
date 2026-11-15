@@ -181,3 +181,92 @@ def test_tool_reports_unavailable_when_both_sources_fail(monkeypatch):
     monkeypatch.setattr(stock_pack.bs, "daily_kline", down)
     result = guard(stock_pack.get_stock_pack.__wrapped__.__wrapped__)("600919", 120)
     assert result["ok"] is False and result["error"] == "data_source_unavailable"
+
+
+# --------------------------------------------------------------------------- #
+# reference_plan: 固定规则，同样的数据永远得到同样的结果
+# --------------------------------------------------------------------------- #
+def test_reference_plan_matches_hand_calculation():
+    supports = [
+        {"price": 6.33, "basis": "MA5"},
+        {"price": 6.24, "basis": "MA10"},
+        {"price": 6.08, "basis": "MA20"},
+    ]
+    resistances = [{"price": 6.60, "basis": "近20日最高/近60日最高"}]
+    plan = stock_pack._reference_plan(6.53, supports, resistances)
+
+    assert plan["available"] is True
+    assert plan["buy_zone"]["low"] == pytest.approx(6.30, abs=0.01)
+    assert plan["buy_zone"]["high"] == pytest.approx(6.39, abs=0.01)
+    assert plan["stop"] == pytest.approx(6.05, abs=0.01)
+    assert plan["take_profit_1"]["low"] == pytest.approx(6.53, abs=0.01)
+    assert plan["take_profit_1"]["high"] == pytest.approx(6.60, abs=0.01)
+    assert plan["take_profit_2"] is None
+    expected_rr = (6.53 - 6.39) / (6.39 - 6.05)
+    assert plan["rr"] == pytest.approx(expected_rr, abs=0.02)
+    assert plan["rr"] < 1  # 紧贴阶段高点，盈亏比差，必须如实暴露
+    assert plan["stop_too_far"] is False
+    assert plan["position_cap_by_risk_pct"] == pytest.approx(
+        2.0 / max(plan["stop_distance_pct"] + 3.0, 5.0) * 100, abs=0.1
+    )
+
+
+def test_reference_plan_is_deterministic():
+    pack_a = stock_pack.compute_pack(_bars(130))
+    pack_b = stock_pack.compute_pack(_bars(130))
+    assert pack_a["reference_plan"] == pack_b["reference_plan"]
+
+
+def test_reference_plan_ordering_invariants_on_real_shape():
+    plan = stock_pack.compute_pack(_bars(130))["reference_plan"]
+    assert plan["available"] is True
+    assert plan["stop"] < plan["buy_zone"]["low"] <= plan["buy_zone"]["high"]
+    tp1 = plan["take_profit_1"]
+    assert tp1 is None or tp1["low"] > plan["buy_zone"]["high"]
+
+
+def test_reference_plan_single_support_uses_three_percent_stop():
+    plan = stock_pack._reference_plan(
+        10.0, [{"price": 9.8, "basis": "MA20"}], [{"price": 10.8, "basis": "近20日最高"}]
+    )
+    assert plan["stop"] == pytest.approx(9.8 * 0.97, abs=0.01)
+    assert "仅一个支撑" in plan["stop_basis"]
+
+
+def test_reference_plan_without_resistance_has_no_take_profit_or_rr():
+    plan = stock_pack._reference_plan(10.0, [{"price": 9.5, "basis": "MA5"}], [])
+    assert plan["take_profit_1"] is None and plan["rr"] is None
+    assert any("止盈位缺失" in n for n in plan["notes"])
+
+
+def test_reference_plan_flags_far_stop():
+    plan = stock_pack._reference_plan(
+        10.0,
+        [{"price": 9.9, "basis": "MA5"}, {"price": 9.2, "basis": "MA10"}, {"price": 8.5, "basis": "MA20"}],
+        [{"price": 11.0, "basis": "近20日最高"}],
+    )
+    assert plan["stop_too_far"] is True
+    assert any("6%" in n for n in plan["notes"])
+
+
+def test_reference_plan_unavailable_without_supports():
+    plan = stock_pack._reference_plan(10.0, [], [{"price": 11.0, "basis": "x"}])
+    assert plan["available"] is False and "reason" in plan
+
+
+def test_reference_plan_skips_resistance_too_close_to_buy_zone():
+    plan = stock_pack._reference_plan(
+        10.0,
+        [{"price": 9.95, "basis": "MA5"}, {"price": 9.7, "basis": "MA10"}],
+        [{"price": 10.05, "basis": "近20日最高"}, {"price": 10.8, "basis": "近60日最高"}],
+    )
+    assert plan["take_profit_1"]["high"] == pytest.approx(10.8, abs=0.01)
+    assert plan["take_profit_1"]["low"] > plan["buy_zone"]["high"]
+    assert any("已跳过" in n for n in plan["notes"])
+
+
+def test_reference_plan_only_too_close_resistance_means_no_take_profit():
+    plan = stock_pack._reference_plan(
+        10.0, [{"price": 9.9, "basis": "MA5"}], [{"price": 10.02, "basis": "近20日最高"}]
+    )
+    assert plan["take_profit_1"] is None and plan["rr"] is None
