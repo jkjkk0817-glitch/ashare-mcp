@@ -102,6 +102,30 @@ def test_verify_fails_on_time_gap():
     assert any("相差" in r for r in result["reasons"])
 
 
+def test_verify_post_close_ignores_time_gap():
+    # 收盘后腾讯时间戳可以晚到16:14，新浪固定15:00:00：不应因时间差判失败
+    t, s = _pair(t_time="20261113161400")
+    result = qs.verify_pair(t, s)
+    assert result["verified"] is True, result["reasons"]
+    assert result["time_rule"] == "post_close"
+    assert result["time_diff_seconds"] == pytest.approx(4440.0)
+
+
+def test_verify_post_close_still_checks_price_and_date():
+    t, s = _pair(t_time="20261113161400", s_price=13.30)
+    assert qs.verify_pair(t, s)["verified"] is False
+    t, s = _pair(t_time="20261113161400", s_time=("2026-11-12", "15:00:00"))
+    result = qs.verify_pair(t, s)
+    assert result["verified"] is False and any("日期" in r for r in result["reasons"])
+
+
+def test_verify_in_session_time_gap_still_fails():
+    t, s = _pair(t_time="20261113103000", s_time=("2026-11-13", "10:20:00"))
+    result = qs.verify_pair(t, s)
+    assert result["verified"] is False and result["time_rule"] is None
+    assert any("相差" in r for r in result["reasons"])
+
+
 def test_verify_fails_on_price_deviation():
     t, s = _pair(s_price=13.30)  # 0.53%
     result = qs.verify_pair(t, s)
