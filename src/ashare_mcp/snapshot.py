@@ -42,6 +42,8 @@ NO_SNAPSHOT_TOOLS = frozenset(
         "get_minute_kline",
         "get_northbound_realtime",
         "get_stock_sentiment",
+        "get_verified_quote",
+        "get_index_quotes",
     }
 )
 
