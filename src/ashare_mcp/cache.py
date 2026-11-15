@@ -14,8 +14,9 @@ import pickle
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -120,8 +121,37 @@ cache = SQLiteCache(settings.db_path)
 # --------------------------------------------------------------------------- #
 # TTL policies (see PRD §缓存策略)
 # --------------------------------------------------------------------------- #
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+# A 股连续竞价时段（含集合竞价和收盘后短暂缓冲）: 09:15-11:35, 13:00-15:05
+_SESSION_WINDOWS = ((9 * 60 + 15, 11 * 60 + 35), (13 * 60, 15 * 60 + 5))
+
+
+def now_cn() -> datetime:
+    """北京时间当前时刻（Render 服务器是 UTC，不能直接用 datetime.now()）。"""
+    return datetime.now(_SHANGHAI)
+
+
+def _is_trade_day_cn(day: date) -> bool:
+    try:
+        from .utils import dates as _dates
+
+        return bool(_dates.is_trade_day(day))
+    except Exception:  # noqa: BLE001 - calendar unavailable: weekday approximation
+        return day.weekday() < 5
+
+
+def in_trading_session(now: datetime | None = None) -> bool:
+    """是否处于交易时段（北京时间，交易日 09:15-11:35 / 13:00-15:05）。"""
+    now = now or now_cn()
+    if not _is_trade_day_cn(now.date()):
+        return False
+    minutes = now.hour * 60 + now.minute
+    return any(start <= minutes <= end for start, end in _SESSION_WINDOWS)
+
+
 def _secs_until_next(hour: int, minute: int = 0) -> int:
-    now = datetime.now()
+    now = now_cn()
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -132,22 +162,37 @@ TTL_REALTIME = 10          # realtime quote / level-2 bid-ask
 TTL_MINUTE = 300           # minute kline
 TTL_FINANCIAL = 6 * 3600   # financial reports / announcements / research
 TTL_INFO = 24 * 3600       # slow-changing metadata (stock info)
+TTL_INTRADAY_FLOW = 180    # 盘中资金流/板块排名: 3 分钟
+TTL_INTRADAY_KLINE = 60    # 盘中含当日K线的数据: 1 分钟
 
 
 def ttl_daily_kline(args: dict) -> int | None:
-    """Daily kline: permanent if end_date strictly before today; else valid until next 09:00."""
+    """Daily kline: permanent if end_date strictly before today (Beijing time);
+    1 minute while the market is open; otherwise valid until next 09:00 Beijing time."""
     end = (args.get("end_date") or "").replace("-", "")
-    today = datetime.now().strftime("%Y%m%d")
+    today = now_cn().strftime("%Y%m%d")
     if end and end < today:
         return None  # permanent until manual clear
+    if in_trading_session():
+        return TTL_INTRADAY_KLINE
     return _secs_until_next(9, 0)
 
 
 def ttl_intraday_official(args: dict | None = None) -> int:
-    """LHB / margin / chip / fund-flow: before 18:00 -> 30 min; after 18:00 -> until next 09:00."""
-    if datetime.now().hour < 18:
+    """LHB / margin / chip / fund-flow (Beijing time): market open -> 3 min;
+    before 18:00 -> 30 min; after 18:00 -> until next 09:00."""
+    if in_trading_session():
+        return TTL_INTRADAY_FLOW
+    if now_cn().hour < 18:
         return 1800
     return _secs_until_next(9, 0)
+
+
+def ttl_session_aware_daily(args: dict | None = None) -> int:
+    """含当日K线的数据包: 盘中 1 分钟；非盘中沿用 ttl_intraday_official。"""
+    if in_trading_session():
+        return TTL_INTRADAY_KLINE
+    return ttl_intraday_official(args)
 
 
 def cached(ttl: int | None | Callable[[dict], int | None]) -> Callable:
