@@ -198,11 +198,11 @@ def test_reference_plan_matches_hand_calculation():
     assert plan["available"] is True
     assert plan["buy_zone"]["low"] == pytest.approx(6.30, abs=0.01)
     assert plan["buy_zone"]["high"] == pytest.approx(6.39, abs=0.01)
-    assert plan["stop"] == pytest.approx(6.05, abs=0.01)
+    assert plan["stop"] == pytest.approx(6.21, abs=0.01)  # 入场支撑MA5下一级MA10 6.24 下方0.5%
     assert plan["take_profit_1"]["low"] == pytest.approx(6.53, abs=0.01)
     assert plan["take_profit_1"]["high"] == pytest.approx(6.60, abs=0.01)
     assert plan["take_profit_2"] is None
-    expected_rr = (6.53 - 6.39) / (6.39 - 6.05)
+    expected_rr = (6.53 - 6.39) / (6.39 - 6.21)
     assert plan["rr"] == pytest.approx(expected_rr, abs=0.02)
     assert plan["rr"] < 1  # 紧贴阶段高点，盈亏比差，必须如实暴露
     assert plan["stop_too_far"] is False
@@ -230,7 +230,7 @@ def test_reference_plan_single_support_uses_three_percent_stop():
         10.0, [{"price": 9.8, "basis": "MA20"}], [{"price": 10.8, "basis": "近20日最高"}]
     )
     assert plan["stop"] == pytest.approx(9.8 * 0.97, abs=0.01)
-    assert "仅一个支撑" in plan["stop_basis"]
+    assert "没有更深一级支撑" in plan["stop_basis"]
 
 
 def test_reference_plan_without_resistance_has_no_take_profit_or_rr():
@@ -270,3 +270,75 @@ def test_reference_plan_only_too_close_resistance_means_no_take_profit():
         10.0, [{"price": 9.9, "basis": "MA5"}], [{"price": 10.02, "basis": "近20日最高"}]
     )
     assert plan["take_profit_1"] is None and plan["rr"] is None
+
+
+def test_reference_plan_stop_skips_next_support_that_is_too_close():
+    # 第二支撑只比入场支撑低0.5%，不能当止损依据，应取更深的一级
+    plan = stock_pack._reference_plan(
+        10.0,
+        [{"price": 9.90, "basis": "MA5"}, {"price": 9.86, "basis": "MA10"}, {"price": 9.50, "basis": "MA20"}],
+        [{"price": 11.0, "basis": "近20日最高"}],
+    )
+    assert plan["stop"] == pytest.approx(9.50 * 0.995, abs=0.01)
+    assert "MA20" in plan["stop_basis"]
+
+
+def test_reference_plan_good_setup_passes_gate():
+    plan = stock_pack._reference_plan(
+        10.0,
+        [{"price": 9.90, "basis": "MA5"}, {"price": 9.70, "basis": "MA10"}],
+        [{"price": 11.2, "basis": "近20日最高"}],
+    )
+    gated = stock_pack._apply_gate(plan, [], False)
+    assert gated["rr"] >= stock_pack.OBS_MIN_RR
+    assert gated["observation_ok"] is True and gated["gate_failed"] == []
+
+
+def test_gate_rejects_low_rr_missing_target_far_stop_chase_and_limit_up():
+    low_rr = stock_pack._reference_plan(
+        6.53,
+        [{"price": 6.33, "basis": "MA5"}, {"price": 6.24, "basis": "MA10"}, {"price": 6.08, "basis": "MA20"}],
+        [{"price": 6.60, "basis": "近20日最高"}],
+    )
+    gated = stock_pack._apply_gate(low_rr, [], False)
+    assert gated["observation_ok"] is False
+    assert any("盈亏比" in r for r in gated["gate_failed"])
+
+    no_target = stock_pack._apply_gate(
+        stock_pack._reference_plan(10.0, [{"price": 9.5, "basis": "MA5"}], []), [], False
+    )
+    assert any("止盈位缺失" in r for r in no_target["gate_failed"])
+
+    far = stock_pack._reference_plan(
+        10.0,
+        [{"price": 9.9, "basis": "MA5"}, {"price": 9.2, "basis": "MA10"}],
+        [{"price": 14.0, "basis": "近60日最高"}],
+    )
+    assert any("止损距离" in r for r in stock_pack._apply_gate(far, [], False)["gate_failed"])
+
+    chase = stock_pack._apply_gate(
+        stock_pack._reference_plan(
+            10.0, [{"price": 9.9, "basis": "MA5"}, {"price": 9.7, "basis": "MA10"}],
+            [{"price": 12.0, "basis": "x"}],
+        ),
+        ["ret_5d", "deviation_ma20"], False,
+    )
+    assert chase["observation_ok"] is False and any("追高" in r for r in chase["gate_failed"])
+
+    limit_up = stock_pack._apply_gate(
+        stock_pack._reference_plan(
+            10.0, [{"price": 9.9, "basis": "MA5"}, {"price": 9.7, "basis": "MA10"}],
+            [{"price": 12.0, "basis": "x"}],
+        ),
+        [], True,
+    )
+    assert any("涨停" in r for r in limit_up["gate_failed"])
+
+
+def test_gate_on_unavailable_plan_and_pack_integration():
+    unavailable = stock_pack._apply_gate(stock_pack._reference_plan(10.0, [], []), [], False)
+    assert unavailable["observation_ok"] is False and unavailable["gate_failed"]
+
+    plan = stock_pack.compute_pack(_bars(130))["reference_plan"]
+    assert "observation_ok" in plan and "gate_failed" in plan
+    assert plan["gate_min_rr"] == stock_pack.OBS_MIN_RR
