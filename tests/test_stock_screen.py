@@ -131,7 +131,7 @@ def test_missing_source_is_named_in_reasons(monkeypatch):
 # --------------------------------------------------------------------------- #
 # get_stock_pack_batch
 # --------------------------------------------------------------------------- #
-def _fake_pack(close, rr, ok_flag=True, failed=None, lag=False):
+def _fake_pack(close, rr, ok_flag=True, failed=None, lag=False, session="closed", partial=False):
     plan = {
         "available": True, "observation_ok": ok_flag, "gate_failed": failed or [],
         "rr": rr, "stop_distance_pct": 3.0, "buy_zone": {"low": close * 0.97, "high": close * 0.99},
@@ -144,7 +144,7 @@ def _fake_pack(close, rr, ok_flag=True, failed=None, lag=False):
         "chase_triggered": [], "supports": [{"price": close * 0.98, "basis": "MA5"}],
         "resistances": [{"price": close * 1.06, "basis": "近20日最高"}],
     }
-    meta = {"kline_lag": lag, "source": "akshare"}
+    meta = {"kline_lag": lag, "source": "akshare", "market_session": session, "last_bar_partial": partial}
     return pack, meta
 
 
@@ -225,3 +225,24 @@ def test_batch_dedupes_and_rejects_empty(monkeypatch):
     monkeypatch.setattr(stock_screen, "build_pack", lambda code, bars=120: _fake_pack(10.0, 2.0))
     assert _tool()(["600001", "600001", "sh600001"])["requested"] == 1
     assert _tool()([])["error"] == "bad_request"
+
+
+def test_batch_flags_stale_bar_during_session(monkeypatch):
+    monkeypatch.setattr(
+        stock_screen, "build_pack",
+        lambda code, bars=120: _fake_pack(10.0, 2.0, session="trading", partial=False),
+    )
+    result = _tool()(["600001"])
+    assert result["data"][0]["intraday_bar_stale"] is True
+    assert "最新价复核" in result["intraday_note"]
+
+
+def test_batch_no_stale_flag_when_bar_is_partial_or_market_closed(monkeypatch):
+    monkeypatch.setattr(
+        stock_screen, "build_pack",
+        lambda code, bars=120: _fake_pack(10.0, 2.0, session="trading", partial=True),
+    )
+    result = _tool()(["600001"])
+    assert result["data"][0]["intraday_bar_stale"] is False and result["intraday_note"] is None
+    monkeypatch.setattr(stock_screen, "build_pack", lambda code, bars=120: _fake_pack(10.0, 2.0))
+    assert _tool()(["600001"])["data"][0]["intraday_bar_stale"] is False

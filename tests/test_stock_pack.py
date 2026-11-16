@@ -342,3 +342,95 @@ def test_gate_on_unavailable_plan_and_pack_integration():
     plan = stock_pack.compute_pack(_bars(130))["reference_plan"]
     assert "observation_ok" in plan and "gate_failed" in plan
     assert plan["gate_min_rr"] == stock_pack.OBS_MIN_RR
+
+
+# --------------------------------------------------------------------------- #
+# ATR 波动率目标位 与 akshare 熔断
+# --------------------------------------------------------------------------- #
+def test_atr14_matches_manual_calculation():
+    rows = _bars(130)
+    pack = stock_pack.compute_pack(rows)
+    df = pd.DataFrame(rows)
+    prev = df["close"].shift(1)
+    tr = pd.concat(
+        [df["high"] - df["low"], (df["high"] - prev).abs(), (df["low"] - prev).abs()], axis=1
+    ).max(axis=1)
+    assert pack["atr14"] == pytest.approx(tr.iloc[-14:].mean(), abs=0.001)
+    assert pack["atr14_pct"] == pytest.approx(pack["atr14"] / pack["last_bar"]["close"] * 100, abs=0.01)
+
+
+def test_volatility_target_replaces_missing_resistance():
+    plan = stock_pack._reference_plan(
+        10.0, [{"price": 9.9, "basis": "MA5"}, {"price": 9.6, "basis": "MA10"}], [], atr=0.30
+    )
+    tp1 = plan["take_profit_1"]
+    assert plan["tp_is_volatility_target"] is True and tp1["volatility_target"] is True
+    assert tp1["high"] == pytest.approx(round(plan["buy_zone"]["high"] + 2 * 0.30, 2), abs=0.01)
+    assert plan["rr"] is not None
+    assert any("波动率目标位" in n for n in plan["notes"])
+
+
+def test_real_resistance_is_preferred_over_volatility_target():
+    plan = stock_pack._reference_plan(
+        10.0, [{"price": 9.9, "basis": "MA5"}, {"price": 9.6, "basis": "MA10"}],
+        [{"price": 11.0, "basis": "近20日最高"}], atr=0.30,
+    )
+    assert plan["tp_is_volatility_target"] is False
+    assert plan["take_profit_1"]["high"] == pytest.approx(11.0, abs=0.01)
+
+
+def test_no_resistance_and_no_atr_still_leaves_target_missing():
+    plan = stock_pack._reference_plan(10.0, [{"price": 9.9, "basis": "MA5"}], [], atr=None)
+    assert plan["take_profit_1"] is None and plan["rr"] is None
+
+
+def test_volatility_target_can_pass_gate_when_atr_is_large_enough():
+    plan = stock_pack._reference_plan(
+        10.0, [{"price": 9.9, "basis": "MA5"}, {"price": 9.65, "basis": "MA10"}], [], atr=0.45
+    )
+    gated = stock_pack._apply_gate(plan, [], False)
+    assert gated["rr"] >= stock_pack.OBS_MIN_RR and gated["observation_ok"] is True
+
+
+def test_akshare_breaker_skips_akshare_after_a_failure(monkeypatch):
+    calls = {"ak": 0, "bs": 0}
+
+    def ak_down(*a, **k):
+        calls["ak"] += 1
+        raise DataUnavailableError("eastmoney down")
+
+    def bs_ok(*a, **k):
+        calls["bs"] += 1
+        return _bars(130)
+
+    monkeypatch.setattr(stock_pack, "_ak_failed_at", 0.0)
+    monkeypatch.setattr(stock_pack.ak, "daily_hist", ak_down)
+    monkeypatch.setattr(stock_pack.bs, "daily_kline", bs_ok)
+
+    _, source1 = stock_pack._fetch_daily("600919", "2026-01-01", "2026-11-13")
+    _, source2 = stock_pack._fetch_daily("601009", "2026-01-01", "2026-11-13")
+    assert "fallback" in source1 and "暂时跳过" in source2
+    assert calls == {"ak": 1, "bs": 2}  # 第二只没有再白等 akshare
+
+
+def test_akshare_retried_after_breaker_window_and_recovers(monkeypatch):
+    now = {"t": 1000.0}
+    monkeypatch.setattr(stock_pack.time, "time", lambda: now["t"])
+    monkeypatch.setattr(stock_pack, "_ak_failed_at", 1000.0 - stock_pack.AK_BREAKER_SECONDS - 1)
+    monkeypatch.setattr(stock_pack.ak, "daily_hist", lambda *a, **k: _bars(130))
+    _, source = stock_pack._fetch_daily("600919", "2026-01-01", "2026-11-13")
+    assert source == "akshare"
+    assert stock_pack._ak_failed_at == 0.0
+
+
+def test_breaker_falls_back_to_akshare_when_baostock_also_fails(monkeypatch):
+    monkeypatch.setattr(stock_pack.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(stock_pack, "_ak_failed_at", 999.0)
+
+    def bs_down(*a, **k):
+        raise DataUnavailableError("baostock down")
+
+    monkeypatch.setattr(stock_pack.bs, "daily_kline", bs_down)
+    monkeypatch.setattr(stock_pack.ak, "daily_hist", lambda *a, **k: _bars(130))
+    _, source = stock_pack._fetch_daily("600919", "2026-01-01", "2026-11-13")
+    assert source == "akshare"
