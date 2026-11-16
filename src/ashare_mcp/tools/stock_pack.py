@@ -22,6 +22,7 @@ from ..data_sources import akshare_src as ak
 from ..data_sources import baostock_src as bs
 from ..data_sources._base import DataSourceError, EmptyDataError
 from ..utils import codes, dates
+from ..utils.bars import required_last_bar_date
 from ._helpers import DISCLAIMER_NOT_ADVICE, clamp_limit, guard, ok
 
 # 追高预警阈值（与自动化任务提示词一致）
@@ -367,6 +368,51 @@ def _fetch_daily(symbol: str, start: str, end: str) -> tuple[list[dict], str]:
         return bs.daily_kline(symbol, start, end, "qfq"), "baostock (fallback)"
 
 
+def build_pack(symbol: str, bars: int = 120) -> tuple[dict, dict]:
+    """取日K并计算数据包，返回 (pack, 元信息)。get_stock_pack 与批量筛选共用。"""
+    sym = codes.normalize(symbol)
+    n_bars = max(60, min(clamp_limit(bars, default=120, maximum=250), 250))
+
+    now = now_cn()
+    today_cn = now.date()
+    latest_trade = dates.latest_trade_date(today_cn)
+    required_last = required_last_bar_date(now)
+    start = (latest_trade - timedelta(days=int(n_bars * 1.6) + 10)).strftime("%Y-%m-%d")
+    end = latest_trade.strftime("%Y-%m-%d")
+
+    records, source = _fetch_daily(sym, start, end)
+    # 只保留最近 n_bars 根参与计算，保证窗口口径一致
+    recent = sorted(records, key=lambda r: str(r.get("date")))[-n_bars:]
+    pack = compute_pack(recent)
+
+    last_date = pack["bars"]["last_date"]
+    required = required_last.strftime("%Y-%m-%d")
+    lag = last_date < required
+    session = in_trading_session()
+    partial = bool(session and last_date == today_cn.strftime("%Y-%m-%d"))
+    meta = {
+        "symbol": sym,
+        "source": source,
+        "adjust": "qfq",
+        "price_basis": "日K收盘价（盘中为未收盘的当日K线），非实时价",
+        "expected_last_trade_date": required,
+        "kline_lag": bool(lag),
+        "kline_lag_note": (
+            f"日K最新日期{last_date}落后于应有的最新完整日K日期{required}，不得称为最新完整日K。"
+            if lag else None
+        ),
+        "market_session": "trading" if session else "closed",
+        "last_bar_partial": partial,
+        "intraday_note": (
+            "盘中：最后一根日K是未收盘的当日K线，收盘价、涨跌幅、均线、成交额、"
+            "追高检验均含未完成数据；当前价请以 get_verified_quote 为准，"
+            "支撑压力位以此前已完成K线为主要参考。"
+            if partial else None
+        ),
+    }
+    return pack, meta
+
+
 @mcp.tool
 @guard
 @cached(ttl=ttl_session_aware_daily)
@@ -387,42 +433,5 @@ def get_stock_pack(symbol: str, bars: int = 120) -> dict:
       symbol: 股票代码(多种写法均可)。
       bars: 取最近多少根日K，默认120，范围60-250。
     """
-    sym = codes.normalize(symbol)
-    n_bars = max(60, min(clamp_limit(bars, default=120, maximum=250), 250))
-
-    today_cn = now_cn().date()
-    expected_last = dates.latest_trade_date(today_cn)
-    start = (expected_last - timedelta(days=int(n_bars * 1.6) + 10)).strftime("%Y-%m-%d")
-    end = expected_last.strftime("%Y-%m-%d")
-
-    records, source = _fetch_daily(sym, start, end)
-    # 只保留最近 n_bars 根参与计算，保证窗口口径一致
-    recent = sorted(records, key=lambda r: str(r.get("date")))[-n_bars:]
-    pack = compute_pack(recent)
-
-    last_date = pack["bars"]["last_date"]
-    lag = last_date < end
-    session = in_trading_session()
-    partial = bool(session and last_date == today_cn.strftime("%Y-%m-%d"))
-    return ok(
-        pack,
-        symbol=sym,
-        source=source,
-        adjust="qfq",
-        price_basis="日K收盘价（盘中为未收盘的当日K线），非实时价",
-        expected_last_trade_date=end,
-        kline_lag=bool(lag),
-        kline_lag_note=(
-            f"日K最新日期{last_date}落后于最近交易日{end}，不得称为最新完整日K。"
-            if lag else None
-        ),
-        market_session="trading" if session else "closed",
-        last_bar_partial=partial,
-        intraday_note=(
-            "盘中：最后一根日K是未收盘的当日K线，收盘价、涨跌幅、均线、成交额、"
-            "追高检验均含未完成数据；当前价请以 get_verified_quote 为准，"
-            "支撑压力位以此前已完成K线为主要参考。"
-            if partial else None
-        ),
-        note=DISCLAIMER_NOT_ADVICE,
-    )
+    pack, meta = build_pack(symbol, bars)
+    return ok(pack, **meta, note=DISCLAIMER_NOT_ADVICE)
