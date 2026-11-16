@@ -29,7 +29,7 @@ INDEX_MAP = [
 
 RULE_TEXT = (
     "名称一致、行情日期一致、价格偏差<=0.3%（以腾讯价为基准）；盘中两来源行情时间相差<=180秒；"
-    "收盘后两来源时间戳均在15:00之后时视为收盘数据，不比较时间差（time_rule=post_close）"
+    "收盘后两来源时间戳均在15:00之后视为收盘数据（time_rule=post_close）、盘前09:30之前视为昨收数据（time_rule=pre_open），均不比较时间差"
 )
 
 
@@ -50,6 +50,9 @@ def _source_view(quote: dict | None) -> dict | None:
 
 def _merge_row(prefixed: str, tencent: dict | None, sina: dict | None) -> dict:
     check = qs.verify_pair(tencent, sina)
+    missing = [name for name, quote in (("腾讯", tencent), ("新浪", sina)) if not quote]
+    for name in missing:
+        check["reasons"].append(f"{name}未返回该代码的有效行情")
     primary = tencent or sina or {}
     quote_time = primary.get("quote_time")
     now = now_cn()
@@ -74,6 +77,7 @@ def _merge_row(prefixed: str, tencent: dict | None, sina: dict | None) -> dict:
         "price_diff_pct": check["price_diff_pct"],
         "time_diff_seconds": check["time_diff_seconds"],
         "time_rule": check.get("time_rule"),
+        "missing_sources": missing,
         "primary_source": "腾讯财经" if tencent else "新浪财经",
         "sources": {"tencent": _source_view(tencent), "sina": _source_view(sina)},
     }
@@ -98,7 +102,8 @@ def get_verified_quote(symbols: list[str]) -> dict:
     verified(是否通过双源核验)、verify_reasons(未通过原因)、price_diff_pct、
     time_diff_seconds、sources(两个来源各自的价格与时间)、warnings。
     核验标准: 名称一致、行情日期一致、价格偏差<=0.3%；盘中行情时间相差<=180秒，
-    收盘后（两来源时间戳均在15:00之后）不比较时间差，time_rule=post_close。
+    收盘后（两来源时间戳均在15:00之后，time_rule=post_close）和盘前（09:30之前，
+    time_rule=pre_open，价格为昨收）不比较时间差。
     非交易时段返回最近一个交易日的收盘价和收盘时间，同样做双源核验。
     不做快照；两个来源都失败时直接报错，不返回旧价格。
     参数: symbols: 股票代码列表(多种写法均可)，如 ["600919", "601009"]。
