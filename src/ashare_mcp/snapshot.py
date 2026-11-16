@@ -44,6 +44,7 @@ NO_SNAPSHOT_TOOLS = frozenset(
         "get_stock_sentiment",
         "get_verified_quote",
         "get_index_quotes",
+        "get_market_breadth",
     }
 )
 
