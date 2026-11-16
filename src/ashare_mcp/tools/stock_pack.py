@@ -31,6 +31,8 @@ CHASE_DEV_MA20 = 15.0
 CHASE_BIG_BULL_PCT = 5.0
 CHASE_BIG_BULL_STREAK = 3
 LIMIT_UP_PCT = 9.9  # 沪深主板涨停约10%
+OBS_MIN_RR = 1.5  # 进入观察清单的最低计划盈亏比（正式推荐的门槛更高，由环境决定）
+STOP_MIN_GAP = 0.99  # 止损所用的下一级支撑，至少比入场支撑低1%
 
 
 def _num(value: Any) -> float | None:
@@ -140,7 +142,7 @@ def _reference_plan(close: float, supports: list[dict], resistances: list[dict])
     """由支撑压力位机械推出的参考计划（固定规则，同样的数据永远得到同样的结果）。
 
     买入区间 = 第一支撑 ×0.995 ~ min(收盘价, 第一支撑 ×1.01)
-    止损     = 前三个支撑中最低者 ×0.995；只有一个支撑时 = 该支撑 ×0.97
+    止损     = 入场支撑下方的下一级支撑（至少低1%）×0.995；找不到时 = 入场支撑 ×0.97
     止盈1/2  = 最近两个压力位，区间为压力位 ×0.99 ~ 压力位；没有压力位则缺失
     计划盈亏比 = (止盈1下沿 - 买入区间上沿) ÷ (买入区间上沿 - 止损)
     仓位上限(风险预算口径) = 2% ÷ max(止损距离+3个百分点, 5%)
@@ -155,13 +157,13 @@ def _reference_plan(close: float, supports: list[dict], resistances: list[dict])
     buy_low = round(s1 * 0.995, 2)
     buy_high = round(min(close, s1 * 1.01), 2)
 
-    lowest = supports[min(2, len(supports) - 1)]["price"]
-    if len(supports) == 1 or lowest >= s1:
-        stop = round(s1 * 0.97, 2)
-        stop_basis = f"仅一个支撑({supports[0]['basis']} {s1})，按其下方3%"
+    deeper = [x for x in supports[1:] if x["price"] <= s1 * STOP_MIN_GAP]
+    if deeper:
+        stop = round(deeper[0]["price"] * 0.995, 2)
+        stop_basis = f"入场支撑下一级{deeper[0]['basis']} {deeper[0]['price']}下方0.5%"
     else:
-        stop = round(lowest * 0.995, 2)
-        stop_basis = f"前三支撑中最低的{supports[min(2, len(supports) - 1)]['basis']} {lowest}下方0.5%"
+        stop = round(s1 * 0.97, 2)
+        stop_basis = f"入场支撑({supports[0]['basis']} {s1})下方没有更深一级支撑，按其下方3%"
 
     stop_distance_pct = (buy_high - stop) / buy_high * 100 if buy_high else None
 
@@ -207,6 +209,28 @@ def _reference_plan(close: float, supports: list[dict], resistances: list[dict])
         "notes": notes,
         "rule": "机械计算的参考计划，不构成建议；仅对下一交易日（盘前）或当日（盘中）有效",
     }
+
+
+def _apply_gate(plan: dict, chase_triggered: list[str], limit_up_like: bool) -> dict:
+    """进入观察清单的客观门槛：不合格的标的不应给出价位计划。"""
+    failed: list[str] = []
+    if not plan.get("available"):
+        failed.append("下方无可用支撑，无法生成计划")
+    else:
+        if plan.get("rr") is None:
+            failed.append("止盈位缺失，无法计算盈亏比")
+        elif plan["rr"] < OBS_MIN_RR:
+            failed.append(f"计划盈亏比{plan['rr']}低于{OBS_MIN_RR}")
+        if plan.get("stop_too_far"):
+            failed.append(f"止损距离{plan.get('stop_distance_pct')}%超过6%")
+    if chase_triggered:
+        failed.append("触发追高预警: " + "、".join(chase_triggered))
+    if limit_up_like:
+        failed.append("当日涨停或接近涨停，不作买入计划")
+    plan["observation_ok"] = not failed
+    plan["gate_failed"] = failed
+    plan["gate_min_rr"] = OBS_MIN_RR
+    return plan
 
 
 def compute_pack(records: list[dict]) -> dict:
@@ -322,7 +346,9 @@ def compute_pack(records: list[dict]) -> dict:
         "volume_ratio_5_20": _round(volume_ratio_5_20, 2),
         "supports": supports,
         "resistances": resistances,
-        "reference_plan": _reference_plan(last_close, supports, resistances),
+        "reference_plan": _apply_gate(
+            _reference_plan(last_close, supports, resistances), chase_triggered, bool(limit_up_like)
+        ),
         "chase_checks": chase_checks,
         "chase_triggered": chase_triggered,
         "bars": {
@@ -351,7 +377,8 @@ def get_stock_pack(symbol: str, bars: int = 120) -> dict:
     ma(MA5/10/20/60)、ma20_direction、returns_pct(近5/10/20/60日涨幅)、
     deviation_ma20_pct、range(近20/60日高低点)、supports/resistances(技术位候选，
     注明依据: 均线/区间高低点)、reference_plan(按固定规则由支撑压力位推出的买入区间、
-    止损、止盈1/2、计划盈亏比rr、风险预算仓位上限，同样数据永远得到同样结果)、
+    止损、止盈1/2、计划盈亏比rr、风险预算仓位上限，同样数据永远得到同样结果；
+    observation_ok=false表示未通过观察门槛(盈亏比<1.5、止损过远、触发追高、涨停等)，gate_failed给出原因)、
     chase_checks(追高预警逐项结果)、bars(K线根数与日期)。
     口径: 前复权日K，主源 akshare，失败降级 baostock。
     注意: 价格为日K收盘（盘中为未收盘的当日K线），不是实时价；盘中请搭配
