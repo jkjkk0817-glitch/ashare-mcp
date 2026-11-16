@@ -17,6 +17,7 @@ from ..cache import cached, now_cn, ttl_session_aware_daily
 from ..data_sources._base import DataSourceError, EmptyDataError
 from ..data_sources._retry import call_ak
 from ..utils import dates
+from ..utils.bars import required_last_bar_date
 from ._helpers import DISCLAIMER_NOT_ADVICE, guard, ok
 
 INDEXES = [("sh000001", "上证指数"), ("sh000300", "沪深300")]
@@ -131,8 +132,9 @@ def get_index_trend() -> dict:
     返回 index_trend_hit(总体是否命中)、每个指数的明细与命中原因、日线最新日期。
     盘中日线最新日期通常是上一交易日。不做快照。
     """
-    today_cn = now_cn().date()
-    expected_last = dates.latest_trade_date(today_cn)
+    now = now_cn()
+    expected_last = dates.latest_trade_date(now.date())
+    required_last = required_last_bar_date(now)
     start = (expected_last - timedelta(days=200)).strftime("%Y%m%d")
     end = expected_last.strftime("%Y%m%d")
 
@@ -145,7 +147,7 @@ def get_index_trend() -> dict:
             symbol=symbol,
             name=label,
             source=source,
-            lag=info["last_date"] < expected_last.strftime("%Y-%m-%d"),
+            lag=info["last_date"] < required_last.strftime("%Y-%m-%d"),
         )
         rows.append(info)
         sources[symbol] = source
@@ -154,7 +156,7 @@ def get_index_trend() -> dict:
         rows,
         index_trend_hit=any(r["hit"] for r in rows),
         hit_reasons=[f"{r['name']}: {'；'.join(r['reasons'])}" for r in rows if r["hit"]],
-        expected_last_trade_date=expected_last.strftime("%Y-%m-%d"),
+        expected_last_trade_date=required_last.strftime("%Y-%m-%d"),
         volume_basis="成交量比值近似成交额比值",
         source="; ".join(sorted(set(sources.values()))),
         note=DISCLAIMER_NOT_ADVICE,
