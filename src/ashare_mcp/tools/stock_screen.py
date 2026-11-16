@@ -45,6 +45,11 @@ def _row(symbol: str, pack: dict, meta: dict, max_price: float | None) -> dict:
         "resistances": pack["resistances"],
         "kline_lag": meta["kline_lag"],
         "source": meta["source"],
+        "intraday_bar_stale": bool(
+            meta.get("market_session") == "trading" and not meta.get("last_bar_partial")
+        ),
+        "atr14_pct": pack.get("atr14_pct"),
+        "tp_is_volatility_target": plan.get("tp_is_volatility_target", False),
         "observation_ok": plan.get("observation_ok", False),
         "gate_failed": plan.get("gate_failed", []),
         "rr": plan.get("rr"),
@@ -92,7 +97,8 @@ def get_stock_pack_batch(
 
     每只返回: close、pct_change、one_lot_cost(1手所需资金)、observation_ok、gate_failed、
     rr(计划盈亏比)、buy_zone/stop/take_profit_1/2(取自 reference_plan)、supports/resistances、
-    ma20_direction、range_position_20d_pct、chase_triggered、limit_up_like、kline_lag。
+    ma20_direction、range_position_20d_pct、chase_triggered、limit_up_like、kline_lag、
+    intraday_bar_stale(盘中且日K不含当日，须用最新价复核)、tp_is_volatility_target(止盈是否为波动率目标位)。
     收盘价高于 max_price(默认25元，传0表示不限)的股票只返回一行说明，不给价位计划。
     总耗时超过约50秒会停止，未处理的代码列在 not_processed 里，可再调用一次。
     单只失败不影响其他；全部失败才报错。口径与 get_stock_pack 完全一致。
@@ -146,5 +152,10 @@ def get_stock_pack_batch(
         not_processed=not_processed or None,
         elapsed_seconds=round(time.monotonic() - started, 1),
         gate_note="observation_ok要求: 计划盈亏比>=1.5、止损距离<=6%、未触发追高、未涨停",
+        intraday_note=(
+            "盘中：intraday_bar_stale=true 的标的，计划基于上一交易日及以前的日K，"
+            "入选前必须用 get_verified_quote 的最新价复核：最新价明显高于买入区间上沿或已涨停的不得入选。"
+            if any(r.get("intraday_bar_stale") for r in rows) else None
+        ),
         note=DISCLAIMER_NOT_ADVICE,
     )

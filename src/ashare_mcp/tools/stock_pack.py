@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import timedelta
 from typing import Any
 
@@ -34,6 +35,9 @@ CHASE_BIG_BULL_STREAK = 3
 LIMIT_UP_PCT = 9.9  # 沪深主板涨停约10%
 OBS_MIN_RR = 1.5  # 进入观察清单的最低计划盈亏比（正式推荐的门槛更高，由环境决定）
 STOP_MIN_GAP = 0.99  # 止损所用的下一级支撑，至少比入场支撑低1%
+ATR_PERIOD = 14
+ATR_TARGET_MULT = 2.0  # 上方没有技术压力位时，止盈取 买入上沿 + 2×ATR14（波动率目标位）
+AK_BREAKER_SECONDS = 600  # akshare日K失败后，10分钟内直接用baostock，避免每只都先白等重试
 
 
 def _num(value: Any) -> float | None:
@@ -139,12 +143,18 @@ def _price_zone(high: float, ratio_low: float = 0.99) -> dict:
     return {"low": round(high * ratio_low, 2), "high": round(high, 2)}
 
 
-def _reference_plan(close: float, supports: list[dict], resistances: list[dict]) -> dict:
+def _reference_plan(
+    close: float,
+    supports: list[dict],
+    resistances: list[dict],
+    atr: float | None = None,
+) -> dict:
     """由支撑压力位机械推出的参考计划（固定规则，同样的数据永远得到同样的结果）。
 
     买入区间 = 第一支撑 ×0.995 ~ min(收盘价, 第一支撑 ×1.01)
     止损     = 入场支撑下方的下一级支撑（至少低1%）×0.995；找不到时 = 入场支撑 ×0.97
-    止盈1/2  = 最近两个压力位，区间为压力位 ×0.99 ~ 压力位；没有压力位则缺失
+    止盈1/2  = 最近两个压力位，区间为压力位 ×0.99 ~ 压力位；没有可用压力位时，
+               止盈1改用波动率目标位（买入上沿 + 2×ATR14），明确标注，只可用于观察
     计划盈亏比 = (止盈1下沿 - 买入区间上沿) ÷ (买入区间上沿 - 止损)
     仓位上限(风险预算口径) = 2% ÷ max(止损距离+3个百分点, 5%)
     """
@@ -176,6 +186,15 @@ def _reference_plan(close: float, supports: list[dict], resistances: list[dict])
         tp1 = {**_price_zone(usable[0]["price"]), "basis": usable[0]["basis"]}
     if len(usable) > 1:
         tp2 = {**_price_zone(usable[1]["price"]), "basis": usable[1]["basis"]}
+    volatility_target = False
+    if tp1 is None and atr:
+        target = buy_high + ATR_TARGET_MULT * atr
+        tp1 = {
+            **_price_zone(target),
+            "basis": f"波动率目标位(买入上沿+{ATR_TARGET_MULT:g}×ATR14)",
+            "volatility_target": True,
+        }
+        volatility_target = True
 
     rr = None
     if tp1 and stop_distance_pct and buy_high > stop:
@@ -190,6 +209,8 @@ def _reference_plan(close: float, supports: list[dict], resistances: list[dict])
     if skipped:
         names = "、".join(f"{r['basis']} {r['price']}" for r in skipped)
         notes.append(f"压力位{names}距买入区间上沿不足1%，已跳过")
+    if volatility_target:
+        notes.append("上方没有可用的技术压力位，止盈取波动率目标位，不是技术位，只可用于观察，不得用于正式推荐")
     if tp1 is None:
         notes.append("上方没有可用的技术压力位（接近阶段新高），止盈位缺失，不得估算后冒充技术位")
     if stop_distance_pct is not None and stop_distance_pct > 6.0:
@@ -205,6 +226,7 @@ def _reference_plan(close: float, supports: list[dict], resistances: list[dict])
         "stop_too_far": bool(stop_distance_pct is not None and stop_distance_pct > 6.0),
         "take_profit_1": tp1,
         "take_profit_2": tp2,
+        "tp_is_volatility_target": volatility_target,
         "rr": _round(rr),
         "position_cap_by_risk_pct": _round(position_cap, 1),
         "notes": notes,
@@ -305,6 +327,19 @@ def compute_pack(records: list[dict]) -> dict:
 
     supports, resistances = _levels(last_close, ma, highs, lows)
 
+    atr14 = None
+    if len(df) > ATR_PERIOD:
+        prev_close_series = df["close"].shift(1)
+        true_range = pd.concat(
+            [
+                df["high"] - df["low"],
+                (df["high"] - prev_close_series).abs(),
+                (df["low"] - prev_close_series).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        atr14 = _num(true_range.iloc[-ATR_PERIOD:].mean())
+
     chase_checks = {
         "ret_5d": {"value": _round(returns["ret_5d"]), "threshold": CHASE_RET_5D,
                    "triggered": returns["ret_5d"] is not None and returns["ret_5d"] > CHASE_RET_5D},
@@ -345,10 +380,14 @@ def compute_pack(records: list[dict]) -> dict:
         "range": {k: _round(v) for k, v in {**highs, **lows}.items()},
         "range_position_20d_pct": _round(range_pos_20d, 1),
         "volume_ratio_5_20": _round(volume_ratio_5_20, 2),
+        "atr14": _round(atr14, 3),
+        "atr14_pct": _round(atr14 / last_close * 100.0, 2) if atr14 else None,
         "supports": supports,
         "resistances": resistances,
         "reference_plan": _apply_gate(
-            _reference_plan(last_close, supports, resistances), chase_triggered, bool(limit_up_like)
+            _reference_plan(last_close, supports, resistances, atr14),
+            chase_triggered,
+            bool(limit_up_like),
         ),
         "chase_checks": chase_checks,
         "chase_triggered": chase_triggered,
@@ -361,10 +400,25 @@ def compute_pack(records: list[dict]) -> dict:
     }
 
 
+_ak_failed_at = 0.0
+
+
 def _fetch_daily(symbol: str, start: str, end: str) -> tuple[list[dict], str]:
+    """日K：主源 akshare，失败降级 baostock。akshare 刚失败过则短时间内直接用 baostock。"""
+    global _ak_failed_at
+
+    if time.time() - _ak_failed_at < AK_BREAKER_SECONDS:
+        try:
+            return bs.daily_kline(symbol, start, end, "qfq"), "baostock (akshare暂时跳过)"
+        except DataSourceError:
+            pass  # baostock也不行，再给 akshare 一次机会
+
     try:
-        return ak.daily_hist(symbol, start, end, "qfq"), "akshare"
+        records = ak.daily_hist(symbol, start, end, "qfq")
+        _ak_failed_at = 0.0
+        return records, "akshare"
     except DataSourceError:
+        _ak_failed_at = time.time()
         return bs.daily_kline(symbol, start, end, "qfq"), "baostock (fallback)"
 
 
