@@ -90,6 +90,10 @@ def parse_sina(raw: str) -> dict[str, dict]:
             continue
         price = _f(fields[3])
         prev_close = _f(fields[2])
+        price_is_prev_close = False
+        if (price is None or price <= 0) and prev_close and prev_close > 0:
+            # 盘前（集合竞价前）新浪的现价为0：此时的有效价格就是昨收
+            price, price_is_prev_close = prev_close, True
         if price is None or price <= 0:
             continue
         change = price - prev_close if prev_close else None
@@ -107,6 +111,7 @@ def parse_sina(raw: str) -> dict[str, dict]:
             "change": change,
             "pct_change": pct,
             "turnover_rate": None,
+            "price_is_prev_close": price_is_prev_close,
             "quote_time": _parse_time(f"{fields[30]} {fields[31]}", "%Y-%m-%d %H:%M:%S"),
         }
     return out
@@ -158,6 +163,11 @@ def _is_post_close(moment: datetime) -> bool:
     return moment.hour >= 15
 
 
+def _is_pre_open(moment: datetime) -> bool:
+    """行情时间戳是否在当日09:30之前（盘前快照，价格是昨收）。"""
+    return (moment.hour, moment.minute) < (9, 30)
+
+
 def verify_pair(
     tencent: dict | None,
     sina: dict | None,
@@ -168,7 +178,8 @@ def verify_pair(
 
     偏差 = 绝对价差 / 第一来源（腾讯）价格 × 100%。
     例外：两边时间戳都在同一天15:00之后（收盘数据）时不比较时间差，
-    结果中 time_rule="post_close"，其余条件照常核验。
+    结果中 time_rule="post_close"；盘前（09:30之前）两边都是昨收口径时不比较日期
+    和时间差，time_rule="pre_open"，其余条件（名称、价格）照常核验。
     """
     reasons: list[str] = []
     result: dict[str, Any] = {
@@ -193,16 +204,28 @@ def verify_pair(
         reasons.append("至少一个来源没有可识别的行情时间")
     else:
         same_date = t_time.date() == s_time.date()
-        if not same_date:
+        later, earlier = (t_time, s_time) if t_time >= s_time else (s_time, t_time)
+        # 盘前：一边已经切换到今天的盘前快照（价格=昨收），另一边还停在上一交易日的收盘。
+        # 只有"较晚的在09:30之前、较早的在15:00之后、相隔不超过10天"才放行，价格仍要核验。
+        pre_open_pair = (
+            not same_date
+            and _is_pre_open(later)
+            and _is_post_close(earlier)
+            and 0 < (later.date() - earlier.date()).days <= 10
+        )
+        if not same_date and not pre_open_pair:
             reasons.append(f"行情日期不一致: 腾讯={t_time.date()} 新浪={s_time.date()}")
         diff_seconds = abs((t_time - s_time).total_seconds())
         result["time_diff_seconds"] = round(diff_seconds, 1)
+        pre_open_both = same_date and _is_pre_open(t_time) and _is_pre_open(s_time)
         # 收盘后各来源的时间戳含义不同（新浪固定15:00:00，腾讯是收盘后的最后更新时间，
         # 可能晚到十几点甚至更晚），此时比较时间差没有意义；两边都在15:00之后且同一
         # 交易日，就说明两边都是收盘数据，改为只核验日期和价格。
         post_close = same_date and _is_post_close(t_time) and _is_post_close(s_time)
         if post_close:
             result["time_rule"] = "post_close"
+        elif pre_open_pair or pre_open_both:
+            result["time_rule"] = "pre_open"
         elif diff_seconds > max_seconds:
             reasons.append(f"行情时间相差{diff_seconds:.0f}秒，超过{max_seconds:.0f}秒")
 
